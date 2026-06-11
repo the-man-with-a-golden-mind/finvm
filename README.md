@@ -72,39 +72,34 @@ Loading program from: test/fixtures/cli-smoke.json
 
 ## Minimal program
 
-A program is JSON. The smallest meaningful one loads a constant and halts:
+A program is JSON, using the tagless/positional form the runner accepts (see
+[docs/LANGUAGE_SPEC.md](docs/LANGUAGE_SPEC.md)). The smallest meaningful one loads a
+constant and halts:
 
 ```json
 {
   "version": "1.0",
-  "constants": [{ "tag": "VInt", "contents": "42" }],
-  "functions": {
-    "main": {
-      "id": "main", "arity": 0, "registerCount": 1,
-      "parameterTypes": [], "returnType": { "tag": "TUnit" },
-      "instructions": [
-        { "tag": "LOAD_CONST", "contents": [0, 0] },
-        { "tag": "HALT", "contents": 0 }
-      ],
-      "debug": { "name": "main" },
-      "proof": { "isInvariant": false }
-    }
-  },
-  "stateMachines": {}, "entrypoint": "main", "exports": {},
-  "metadata": {}, "typeTable": {}, "capabilities": [],
-  "verification": { "verified": true }
+  "registerCount": 1,
+  "constants": [ { "int": "42" } ],
+  "instructions": [
+    ["LOAD_CONST", 0, 0],
+    ["HALT", 0]
+  ]
 }
 ```
 
 ## Documentation
 
-- [docs/SPEC.md](docs/SPEC.md) — architecture & design principles
-- [docs/INSTRUCTION_SET.md](docs/INSTRUCTION_SET.md) — the bytecode instruction set
-- [docs/COMPILER_TARGET.md](docs/COMPILER_TARGET.md) — targeting FinVM from a high-level language
+- [docs/VM_SPEC.md](docs/VM_SPEC.md) — the VM contract: values, opcodes, ABI, limits, determinism
+- [docs/LANGUAGE_SPEC.md](docs/LANGUAGE_SPEC.md) — compiler target: the exact JSON program/value format
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — code structure & execution pipeline
+- [docs/TESTING.md](docs/TESTING.md) — spec / fuzz / stress / benchmark harnesses
+- [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decision records
+- [docs/AGENTS.md](docs/AGENTS.md) — orientation for AI/automation working in the repo
 - [docs/DATABASE.md](docs/DATABASE.md) — the encrypted/indexed/persistent DB and cache FFI
-- [docs/DEBUGGING.md](docs/DEBUGGING.md) — tracing and the proof system
-- [docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md) — known gaps and the active fix plan
+- [docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md) — known gaps and change history
 - [LLM.txt](LLM.txt) — compact compiler-target reference for LLM/codegen consumers
+- Also: [docs/SPEC.md](docs/SPEC.md), [docs/INSTRUCTION_SET.md](docs/INSTRUCTION_SET.md), [docs/COMPILER_TARGET.md](docs/COMPILER_TARGET.md), [docs/DEBUGGING.md](docs/DEBUGGING.md) (earlier notes)
 
 ## Project layout
 
