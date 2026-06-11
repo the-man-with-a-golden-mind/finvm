@@ -63,7 +63,7 @@ spec = do
         , state: Map.empty, input: Map.empty
         , config: { limits, externalBuiltins: Map.empty, performanceMode: false }
         , trace: List.Nil, proofTrace: List.Nil, outbox: List.Nil, events: List.Nil
-        , counters: { steps: 0 }
+        , counters: { steps: 0 }, labelCache: Map.empty
         }
       result = Eval.notifyMonitorsOfDeath "p1" (ProcessCompleted (VInt (BI.fromInt 7))) machine
 

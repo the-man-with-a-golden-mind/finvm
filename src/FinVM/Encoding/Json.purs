@@ -37,6 +37,7 @@ import FinVM.Registers (emptyRegisters)
 import FinVM.State (VMInput, VMState)
 import FinVM.Type (VMType(..))
 import FinVM.Value (Value(..))
+import FinVM.Vec as Vec
 import Foreign.Object (Object)
 import Foreign.Object as Object
 
@@ -45,6 +46,7 @@ type JsonProgramFile =
   , state :: VMState
   , input :: VMInput
   , limits :: EvalLimits
+  , performanceMode :: Boolean
   }
 
 decodeProgramFile :: String -> Either String JsonProgramFile
@@ -54,30 +56,64 @@ decodeProgramFile source = do
   constants <- case Object.lookup "constants" object of
     Nothing -> pure []
     Just json -> asArray "constants" json >>= traverse decodeValue
-  instructions <- instructionSource object >>= traverse decodeInstruction
-  registerCount <- optionalInt "registerCount" object
-  functionRegisterCount <- case Object.lookup "functions" object >>= Json.toObject >>= Object.lookup "main" >>= Json.toObject of
-    Nothing -> pure Nothing
-    Just mainObject -> optionalInt "functions.main.registerCount" mainObject
   state <- optionalObjectMap "state" object decodeValue
   input <- optionalObjectMap "input" object decodeValue
   limits <- decodeLimits object
+  performanceMode <- optionalBool "performanceMode" object <#> fromMaybe false
   version <- optionalStringWithDefault "version" "1.0" object
+  Tuple functions entrypoint <- decodeFunctionSet object
   let
-    mainFunction = mkMainFunction (fromMaybe (fromMaybe 16 functionRegisterCount) registerCount) instructions
     program =
       { version
       , constants
-      , functions: Map.singleton "main" mainFunction
+      , functions
       , stateMachines: Map.empty
-      , entrypoint: "main"
-      , exports: Map.singleton "main" "main"
+      , entrypoint
+      , exports: Map.singleton entrypoint entrypoint
       , metadata: { description: "JSON CLI program" }
       , typeTable: Map.empty
       , capabilities: []
       , verification: { verified: false }
       }
-  pure { program, state, input, limits }
+  pure { program, state, input, limits, performanceMode }
+
+-- | Resolve the program's functions. If a top-level `functions` object is
+-- | present, each entry is a full function spec (multi-function program, so
+-- | CALL / TAIL_CALL / PROC_SPAWN can target any of them). Otherwise fall back
+-- | to the simplified single implicit `main` built from top-level instructions.
+decodeFunctionSet :: Object Json.Json -> Either String (Tuple (Map String VMFunction.Function) String)
+decodeFunctionSet object =
+  case Object.lookup "functions" object >>= Json.toObject of
+    Just fnsObj | not (Object.isEmpty fnsObj) -> do
+      pairs <- traverse decodeNamedFunction (Object.toUnfoldable fnsObj :: Array (Tuple String Json.Json))
+      entrypoint <- optionalStringWithDefault "entrypoint" "main" object
+      pure (Tuple (Map.fromFoldable pairs) entrypoint)
+    _ -> do
+      instructions <- instructionSource object >>= traverse decodeInstruction
+      registerCount <- optionalInt "registerCount" object
+      pure (Tuple (Map.singleton "main" (mkMainFunction (fromMaybe 16 registerCount) instructions)) "main")
+
+decodeNamedFunction :: Tuple String Json.Json -> Either String (Tuple String VMFunction.Function)
+decodeNamedFunction (Tuple fid specJson) = do
+  spec <- asObject ("function " <> fid) specJson
+  arity <- optionalInt "arity" spec <#> fromMaybe 0
+  registerCount <- optionalInt "registerCount" spec <#> fromMaybe (max 16 arity)
+  instructions <- case Object.lookup "instructions" spec of
+    Just j -> asArray ("instructions for " <> fid) j >>= traverse decodeInstruction
+    Nothing -> Left ("function " <> fid <> " is missing an instructions array")
+  isInvariant <- case Object.lookup "proof" spec >>= Json.toObject of
+    Just proofObj -> optionalBool "isInvariant" proofObj <#> fromMaybe false
+    Nothing -> pure false
+  pure $ Tuple fid
+    { id: fid
+    , arity
+    , registerCount
+    , parameterTypes: []
+    , returnType: TAny
+    , instructions
+    , debug: { name: fid }
+    , proof: { isInvariant }
+    }
 
 runJsonProgram :: String -> String
 runJsonProgram source = (runJsonProgramResult source).output
@@ -137,19 +173,22 @@ initialMachine file =
   , scheduler: Scheduler.spawnProcess Scheduler.initialScheduler initialProcess
   , state: file.state
   , input: file.input
-  , config: { limits: file.limits, externalBuiltins: Map.empty, performanceMode: false }
+  , config: { limits: file.limits, externalBuiltins: Map.empty, performanceMode: file.performanceMode }
   , trace: List.Nil
   , proofTrace: List.Nil
   , outbox: List.Nil
   , events: List.Nil
-  , counters: { steps: 0 }
+  , counters: { steps: 0 }, labelCache: Map.empty
   }
   where
+    entry :: String
+    entry = file.program.entrypoint
+
     initialFrame :: Frame
     initialFrame =
-      { function: "main"
+      { function: entry
       , pc: 0
-      , registers: emptyRegisters (fromMaybe 16 (Map.lookup "main" file.program.functions <#> _.registerCount))
+      , registers: emptyRegisters (fromMaybe 16 (Map.lookup entry file.program.functions <#> _.registerCount))
       , returnRegister: Nothing
       , caller: Nothing
       }
@@ -158,7 +197,7 @@ initialMachine file =
     initialProcess =
       { pid: "main"
       , status: ProcessReady
-      , function: "main"
+      , function: entry
       , frame: initialFrame
       , callStack: []
       , mailbox: []
@@ -326,7 +365,7 @@ decodeValue json =
     (Right <<< VBool)
     decodeNumberValue
     (Right <<< VString)
-    (map VList <<< traverse decodeValue)
+    (map (VList <<< Vec.fromArray) <<< traverse decodeValue)
     decodeObjectValue
     json
 
@@ -343,7 +382,7 @@ decodeObjectValue object =
   where
     -- Tags emitted by `valueToJson`, in lookup order. The first one present
     -- determines the value's type; an object with none is treated as a record.
-    taggedKeys = [ "int", "fixed", "rational", "bool", "string", "symbol", "bytes", "list", "record", "variant" ]
+    taggedKeys = [ "int", "fixed", "rational", "bool", "string", "symbol", "bytes", "list", "map", "record", "variant" ]
 
     firstTaggedKey =
       Array.findMap (\k -> Tuple k <$> Object.lookup k object) taggedKeys
@@ -356,10 +395,28 @@ decodeObjectValue object =
       "string" -> VString <$> asString "string" value
       "symbol" -> VSymbol <$> asString "symbol" value
       "bytes" -> VBytes <$> (asArray "bytes" value >>= traverse asByte)
-      "list" -> VList <$> (asArray "list" value >>= traverse decodeValue)
+      "list" -> (VList <<< Vec.fromArray) <$> (asArray "list" value >>= traverse decodeValue)
+      "map" -> decodeMap value
       "record" -> VRecord <$> decodeStringMapValue "record" value
       "variant" -> decodeVariant value
       _ -> VRecord <$> traverseObject decodeValue object
+
+decodeMap :: Json.Json -> Either String Value
+decodeMap json = do
+  entries <- asArray "map" json
+  pairs <- traverse decodeMapEntry entries
+  pure (VMap (Map.fromFoldable pairs))
+
+decodeMapEntry :: Json.Json -> Either String (Tuple Value Value)
+decodeMapEntry json = do
+  obj <- asObject "map entry" json
+  key <- case Object.lookup "key" obj of
+    Just k -> decodeValue k
+    Nothing -> Left "map entry missing key"
+  value <- case Object.lookup "value" obj of
+    Just v -> decodeValue v
+    Nothing -> Left "map entry missing value"
+  pure (Tuple key value)
 
 decodeIntValue :: Json.Json -> Either String Value
 decodeIntValue json = do
@@ -450,7 +507,7 @@ valueToJson = case _ of
   VString s -> objectJson [ Tuple "string" (Json.fromString s) ]
   VBytes bytes -> objectJson [ Tuple "bytes" (Json.fromArray (map (Json.fromNumber <<< Int.toNumber) bytes)) ]
   VSymbol s -> objectJson [ Tuple "symbol" (Json.fromString s) ]
-  VList values -> objectJson [ Tuple "list" (Json.fromArray (map valueToJson values)) ]
+  VList values -> objectJson [ Tuple "list" (Json.fromArray (map valueToJson (Vec.toArray values))) ]
   VMap values -> objectJson [ Tuple "map" (Json.fromArray (map mapEntryToJson (Map.toUnfoldable values :: Array (Tuple Value Value)))) ]
   VRecord values -> objectJson [ Tuple "record" (stringMapToJson values) ]
   VVariant tag payload -> objectJson [ Tuple "variant" (objectJson [ Tuple "tag" (Json.fromString tag), Tuple "payload" (valueToJson payload) ]) ]
@@ -491,6 +548,11 @@ optionalInt :: String -> Object Json.Json -> Either String (Maybe Int)
 optionalInt key object = case Object.lookup key object of
   Nothing -> pure Nothing
   Just value -> Just <$> asInt key value
+
+optionalBool :: String -> Object Json.Json -> Either String (Maybe Boolean)
+optionalBool key object = case Object.lookup key object of
+  Nothing -> pure Nothing
+  Just value -> Just <$> asBool key value
 
 optionalNestedInt :: String -> String -> Object Json.Json -> Either String (Maybe Int)
 optionalNestedInt objectKey key object = case Object.lookup objectKey object >>= Json.toObject of

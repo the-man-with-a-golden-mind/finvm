@@ -38,10 +38,11 @@ function row(label, ms, n) {
 // Workload A — arithmetic loop: sum of 0..N-1
 // ---------------------------------------------------------------------------
 // FinVM program: registers r0=i, r1=sum, r2=limit, r3=one, r4=cond.
-function loopProgram(n) {
+function loopProgram(n, performanceMode = false) {
     return JSON.stringify({
         version: '1.0',
         registerCount: 5,
+        performanceMode,
         limits: { maxSteps: 6 * n + 100 },
         constants: [{ int: '0' }, { int: '1' }, { int: String(n) }],
         instructions: [
@@ -62,13 +63,47 @@ function loopProgram(n) {
     });
 }
 
+// Same loop, but with `pad` dummy LABEL instructions before the body so the
+// JUMP-back target sits at a high instruction index. With the O(1) label cache,
+// per-jump cost is independent of `pad`; with the old linear scan it grew with it.
+function paddedLoopProgram(n, pad) {
+    const labels = [];
+    for (let i = 0; i < pad; i++) labels.push(['LABEL', `pad_${i}`]);
+    return JSON.stringify({
+        version: '1.0',
+        registerCount: 5,
+        performanceMode: true,
+        limits: { maxSteps: 6 * n + pad + 100 },
+        constants: [{ int: '0' }, { int: '1' }, { int: String(n) }],
+        instructions: [
+            ...labels,
+            ['LOAD_CONST', 1, 0], ['LOAD_CONST', 0, 0], ['LOAD_CONST', 3, 1], ['LOAD_CONST', 2, 2],
+            ['LABEL', 'loop'],
+            ['LT', 4, 0, 2], ['JUMP_IF_FALSE', 4, 'end'],
+            ['ADD', 1, 1, 0], ['ADD', 0, 0, 3], ['JUMP', 'loop'],
+            ['LABEL', 'end'], ['RETURN', 1],
+        ],
+    });
+}
+
+function benchLabelCache() {
+    console.log(`\n=== Label resolution: O(1) cache vs program size (${VM_ITERS} iters, perf mode) ===`);
+    const near = bestOf(() => runJsonProgram(paddedLoopProgram(VM_ITERS, 0)));
+    const far = bestOf(() => runJsonProgram(paddedLoopProgram(VM_ITERS, 2000)));
+    row('jump target near top (pad=0)', near.ms, VM_ITERS);
+    row('jump target far down (pad=2000)', far.ms, VM_ITERS);
+    console.log(`\n  ratio far/near = ${(far.ms / near.ms).toFixed(2)}x (≈1.0 means jump cost is O(1) in program size)`);
+}
+
 function benchWorkloadA() {
     console.log(`\n=== Workload A: sum of 0..${VM_ITERS - 1} (arithmetic loop) ===`);
     const expected = bigInt(VM_ITERS).times(VM_ITERS - 1).divide(2).toString();
-    const prog = loopProgram(VM_ITERS);
+    const progTraced = loopProgram(VM_ITERS, false);
+    const progPerf = loopProgram(VM_ITERS, true);
 
-    const vm = bestOf(() => runJsonProgram(prog));
-    const vmSum = JSON.parse(vm.result)?.result?.int;
+    const vmTraced = bestOf(() => runJsonProgram(progTraced));
+    const vmPerf = bestOf(() => runJsonProgram(progPerf));
+    const vmSum = JSON.parse(vmPerf.result)?.result?.int;
 
     const jsBig = bestOf(() => {
         let sum = bigInt(0);
@@ -83,10 +118,12 @@ function benchWorkloadA() {
     });
 
     console.log(`  (correctness: VM=${vmSum}, expected=${expected}, match=${vmSum === expected})\n`);
-    row('FinVM (deterministic VM)', vm.ms, VM_ITERS);
+    row('FinVM (tracing, default)', vmTraced.ms, VM_ITERS);
+    row('FinVM (performanceMode)', vmPerf.ms, VM_ITERS);
     row('native JS + big-integer', jsBig.ms, VM_ITERS);
     row('native JS + Number', jsNum.ms, VM_ITERS);
-    console.log(`\n  FinVM is ~${(vm.ms / jsBig.ms).toFixed(0)}x slower than JS+bigint, ~${(vm.ms / jsNum.ms).toFixed(0)}x slower than JS+Number`);
+    console.log(`\n  performanceMode is ~${(vmTraced.ms / vmPerf.ms).toFixed(2)}x faster than the tracing default`);
+    console.log(`  FinVM (perf) is ~${(vmPerf.ms / jsBig.ms).toFixed(0)}x slower than JS+bigint, ~${(vmPerf.ms / jsNum.ms).toFixed(0)}x slower than JS+Number`);
     console.log('  (expected: FinVM is a safe, deterministic tree-walking interpreter, not a JIT)');
 }
 
@@ -162,6 +199,7 @@ async function main() {
     console.log('FinVM Benchmark — VM vs native JS, DB vs native data structures');
     console.log(`(VM_ITERS=${VM_ITERS}, DB_SIZE=${DB_SIZE}, best of ${REPS} reps)`);
     benchWorkloadA();
+    benchLabelCache();
     await benchWorkloadB();
     console.log('\nDone.');
 }

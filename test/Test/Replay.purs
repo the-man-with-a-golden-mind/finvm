@@ -38,7 +38,7 @@ spec = do
       machine :: Machine
       machine =
         { program: program, scheduler: initialScheduler, state: Map.empty, input: Map.empty, config: { limits: snapshotLimits, externalBuiltins: Map.empty, performanceMode: false }
-        , trace: List.Nil, proofTrace: List.Nil, outbox: List.Nil, events: List.Nil, counters: { steps: 0 }
+        , trace: List.Nil, proofTrace: List.Nil, outbox: List.Nil, events: List.Nil, counters: { steps: 0 }, labelCache: Map.empty
         }
 
     it "produces identical snapshots for the same machine state" do
@@ -111,5 +111,5 @@ spec = do
       , proofTrace: List.Nil
       , outbox: List.Nil
       , events: List.Nil
-      , counters: { steps: 0 }
+      , counters: { steps: 0 }, labelCache: Map.empty
       }

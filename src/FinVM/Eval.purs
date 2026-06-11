@@ -21,9 +21,12 @@ import Effect.Console (log)
 import Control.Monad.Rec.Class (Step(..), tailRecM)
 
 -- | Run the machine until all processes complete, fail, or a limit is reached.
+-- | Precomputes the per-function label cache once so JUMP targets resolve in
+-- | O(1) for the whole run instead of scanning instructions on every jump.
 runMachine :: Machine -> Either VMError Machine
-runMachine machineInit = tailRecM runSlice machineInit
+runMachine machineInit0 = tailRecM runSlice machineInit
   where
+    machineInit = machineInit0 { labelCache = Interpreter.buildLabelCache machineInit0.program }
     runSlice m = 
       if m.counters.steps >= m.config.limits.maxSteps
         then Right (Done m)

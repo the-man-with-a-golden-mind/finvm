@@ -8,6 +8,7 @@ import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
 import Data.Tuple (Tuple(..))
 import FinVM.Value (Value(..), NodeRef(..))
+import FinVM.Vec as Vec
 
 -- | Deterministically convert a Value to a canonical string representation for hashing.
 canonicalValue :: Value -> String
@@ -20,7 +21,7 @@ canonicalValue = case _ of
   VString s -> "string:" <> show s
   VBytes b -> "bytes:" <> show b
   VSymbol s -> "symbol:" <> s
-  VList l -> "[" <> (Array.intercalate "," (canonicalValue <$> l)) <> "]"
+  VList l -> "[" <> (Array.intercalate "," (canonicalValue <$> Vec.toArray l)) <> "]"
   VMap m -> "map{" <> canonicalMapEntries (Map.toUnfoldable m) <> "}"
   VRecord r -> "record{" <> canonicalEntries (Map.toUnfoldable r) <> "}"
   VVariant t p -> "variant:" <> t <> "(" <> canonicalValue p <> ")"

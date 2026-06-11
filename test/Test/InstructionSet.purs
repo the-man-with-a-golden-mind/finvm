@@ -11,6 +11,7 @@ import Data.Maybe (Maybe(..))
 import Data.Either (Either(..))
 import FinVM.Eval as Eval
 import FinVM.Value (Value(..))
+import FinVM.Vec as Vec
 import FinVM.Instruction (Instruction(..))
 import FinVM.Program (Program)
 import FinVM.Machine (Machine)
@@ -31,7 +32,7 @@ spec = do
           Map.lookup "input" m'.state `shouldEqual` Just (VString "ctx")
           Map.lookup "opt" m'.state `shouldEqual` Just (VOption (Just (VInt (BI.fromInt 1))))
           Map.lookup "has" m'.state `shouldEqual` Just (VBool true)
-          Map.lookup "keys" m'.state `shouldEqual` Just (VList [VString "a"])
+          Map.lookup "keys" m'.state `shouldEqual` Just (VList (Vec.fromArray [VString "a"]))
           Map.lookup "removed" m'.state `shouldEqual` Just (VRecord Map.empty)
           Map.lookup "len" m'.state `shouldEqual` Just (VInt (BI.fromInt 2))
           Map.lookup "tag" m'.state `shouldEqual` Just (VString "Some")
@@ -73,7 +74,7 @@ baseMachine program process =
   , proofTrace: List.Nil
   , outbox: List.Nil
   , events: List.Nil
-  , counters: { steps: 0 }
+  , counters: { steps: 0 }, labelCache: Map.empty
   }
 
 processFor :: String -> Process

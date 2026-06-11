@@ -6,6 +6,7 @@ import Data.Argonaut.Core as Json
 import Data.Argonaut.Parser (jsonParser)
 import Data.Either (Either(..))
 import Data.Maybe (Maybe(..))
+import Data.Tuple (Tuple(..))
 import FinVM.Encoding.Json as Encoding.Json
 import Foreign.Object as Object
 import Test.Spec (Spec, describe, it)
@@ -34,6 +35,28 @@ spec = do
           case fieldString "error" object of
             Just error -> (error == "Unsupported instruction opcode: DOES_NOT_EXIST") `shouldEqual` true
             Nothing -> fail ("missing error in output: " <> output)
+
+    it "runs a multi-function program with recursive CALL (factorial)" do
+      let output = Encoding.Json.runJsonProgram factorialProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          fieldIntString "result" object `shouldEqual` Just "120"
+
+    it "honors performanceMode from the program JSON" do
+      case Encoding.Json.decodeProgramFile perfProgram of
+        Left err -> fail ("decode failed: " <> err)
+        Right file -> file.performanceMode `shouldEqual` true
+
+    it "produces the same result with performanceMode on as off" do
+      let onOut = Encoding.Json.runJsonProgram perfProgram
+          offOut = Encoding.Json.runJsonProgram goldenProgram
+      -- both compute 40 + 2 = 42
+      case Tuple (parseObject onOut) (parseObject offOut) of
+        Tuple (Right onObj) (Right offObj) ->
+          fieldIntString "result" onObj `shouldEqual` fieldIntString "result" offObj
+        _ -> fail "failed to parse perf-mode outputs"
 
     it "enforces the step limit so an infinite loop terminates" do
       -- If the step limit were not enforced, runJsonProgram would never return
@@ -99,6 +122,52 @@ hashProgram =
       ["LOAD_CONST", 0, 0],
       ["CALL_BUILTIN", 1, "hash.sha256@1", [0]],
       ["RETURN", 1]
+    ]
+  }
+  """
+
+factorialProgram :: String
+factorialProgram =
+  """
+  {
+    "constants": [ { "int": "1" }, { "int": "5" } ],
+    "entrypoint": "main",
+    "functions": {
+      "main": { "arity": 0, "registerCount": 2, "instructions": [
+        ["LOAD_CONST", 0, 1],
+        ["CALL", 1, "fact", [0]],
+        ["RETURN", 1] ] },
+      "fact": { "arity": 1, "registerCount": 6, "instructions": [
+        ["LOAD_CONST", 1, 0],
+        ["LTE", 2, 0, 1],
+        ["JUMP_IF", 2, "base"],
+        ["SUB", 3, 0, 1],
+        ["CALL", 4, "fact", [3]],
+        ["MUL", 5, 0, 4],
+        ["RETURN", 5],
+        ["LABEL", "base"],
+        ["RETURN", 1] ] }
+    }
+  }
+  """
+
+perfProgram :: String
+perfProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 4,
+    "performanceMode": true,
+    "constants": [
+      { "int": "40" },
+      { "int": "2" }
+    ],
+    "instructions": [
+      ["LOAD_CONST", 0, 0],
+      ["LOAD_CONST", 1, 1],
+      ["ADD", 2, 0, 1],
+      ["STATE_SET", "answer", 2],
+      ["RETURN", 2]
     ]
   }
   """

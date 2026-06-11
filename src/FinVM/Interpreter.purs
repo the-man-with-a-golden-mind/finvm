@@ -17,6 +17,7 @@ import FinVM.Encoding.Snapshot as Snapshot
 import FinVM.Numeric.BigInt as BI
 import FinVM.Numeric.Fixed as Fixed
 import FinVM.Machine (Machine)
+import FinVM.Program (Program)
 import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), CancelReason(..), ExitReason(..))
 import FinVM.Process as ProcessTypes
 import FinVM.Process.Scheduler as Scheduler
@@ -27,6 +28,7 @@ import FinVM.Debug.Trace as DebugTrace
 import FinVM.Function as VMFunction
 import FinVM.Instruction (Instruction(..))
 import FinVM.Value (Value(..), NodeRef(..))
+import FinVM.Vec as Vec
 import FinVM.Error (VMError(..), ErrorCode(..))
 import FinVM.Error as VMErrorCode
 
@@ -62,8 +64,8 @@ stepProcess m p = do
   evalInstruction m_traced p' func inst
 
 evalInstruction :: Machine -> Process -> VMFunction.Function -> Instruction -> Either VMError (Tuple Machine Process)
-evalInstruction m p func inst = 
-  let 
+evalInstruction m p func inst =
+  let
     pNextPc = p { frame = p.frame { pc = p.frame.pc + 1 } }
   in case inst of
   NOOP -> pure $ Tuple m pNextPc
@@ -78,7 +80,7 @@ evalInstruction m p func inst =
   LABEL _ -> pure $ Tuple m pNextPc
 
   JUMP label -> do
-    pc <- findLabel func label
+    pc <- findLabel m func label
     pure $ Tuple m (p { frame = p.frame { pc = pc } })
 
   JUMP_IF r label -> do
@@ -87,7 +89,7 @@ evalInstruction m p func inst =
       VBool b ->
         if b
           then do
-            pc <- findLabel func label
+            pc <- findLabel m func label
             pure $ Tuple m (p { frame = p.frame { pc = pc } })
           else pure $ Tuple m pNextPc
       _ -> Left $ VMError TypeMismatch "JUMP_IF requires a Boolean register"
@@ -98,7 +100,7 @@ evalInstruction m p func inst =
       VBool b ->
         if not b
           then do
-            pc <- findLabel func label
+            pc <- findLabel m func label
             pure $ Tuple m (p { frame = p.frame { pc = pc } })
           else pure $ Tuple m pNextPc
       _ -> Left $ VMError TypeMismatch "JUMP_IF_FALSE requires a Boolean register"
@@ -277,22 +279,22 @@ evalInstruction m p func inst =
   RECORD_KEYS dst r -> do
     vR <- readReg p r
     case vR of
-      VRecord fields -> pure $ Tuple m (writeReg pNextPc dst (VList (VString <$> (Set.toUnfoldable (Map.keys fields) :: Array String))))
+      VRecord fields -> pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (VString <$> (Set.toUnfoldable (Map.keys fields) :: Array String)))))
       _ -> Left $ VMError TypeMismatch "RECORD_KEYS requires a Record"
 
-  LIST_NEW dst -> pure $ Tuple m (writeReg pNextPc dst (VList []))
+  LIST_NEW dst -> pure $ Tuple m (writeReg pNextPc dst (VList Vec.empty))
 
   LIST_FROM dst regs -> do
     vals <- traverse (readReg p) regs
     if Array.length vals > m.config.limits.maxListLength
       then Left $ VMError InvalidInstruction "LIST_FROM exceeded maxListLength"
-      else pure $ Tuple m (writeReg pNextPc dst (VList vals))
+      else pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray vals)))
 
   LIST_APPEND dst l valReg -> do
     vL <- readReg p l
     vV <- readReg p valReg
     case vL of
-      VList elements -> pure $ Tuple m (writeReg pNextPc dst (VList (Array.snoc elements vV)))
+      VList elements -> pure $ Tuple m (writeReg pNextPc dst (VList (Vec.snoc elements vV)))
       _ -> Left $ VMError TypeMismatch "LIST_APPEND requires a List"
 
   LIST_GET dst l idxReg -> do
@@ -303,7 +305,7 @@ evalInstruction m p func inst =
         let i = BI.toInt idx
         case i of
           Nothing -> Left $ VMError InvalidInstruction "List index out of BigInt range"
-          Just idxInt -> case Array.index elements idxInt of
+          Just idxInt -> case Vec.index elements idxInt of
             Nothing -> Left $ VMError InvalidInstruction "List index out of bounds"
             Just v -> pure $ Tuple m (writeReg pNextPc dst v)
       _, _ -> Left $ VMError TypeMismatch "LIST_GET requires a List and an Integer index"
@@ -315,7 +317,7 @@ evalInstruction m p func inst =
     case vL, vIdx of
       VList elements, VInt idx -> do
         idxInt <- bigintToInt "List index out of BigInt range" idx
-        case Array.updateAt idxInt vVal elements of
+        case Vec.updateAt idxInt vVal elements of
           Nothing -> Left $ VMError InvalidInstruction "List index out of bounds"
           Just elements' -> pure $ Tuple m (writeReg pNextPc dst (VList elements'))
       _, _ -> Left $ VMError TypeMismatch "LIST_SET requires a List and an Integer index"
@@ -323,7 +325,7 @@ evalInstruction m p func inst =
   LIST_LENGTH dst l -> do
     vL <- readReg p l
     case vL of
-      VList elements -> pure $ Tuple m (writeReg pNextPc dst (VInt (BI.fromInt (Array.length elements))))
+      VList elements -> pure $ Tuple m (writeReg pNextPc dst (VInt (BI.fromInt (Vec.length elements))))
       _ -> Left $ VMError TypeMismatch "LIST_LENGTH requires a List"
 
   LIST_SLICE dst l startReg endReg -> do
@@ -334,7 +336,7 @@ evalInstruction m p func inst =
       VList elements, VInt start, VInt end -> do
         startInt <- bigintToInt "List slice start out of BigInt range" start
         endInt <- bigintToInt "List slice end out of BigInt range" end
-        pure $ Tuple m (writeReg pNextPc dst (VList (Array.slice startInt endInt elements)))
+        pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (Array.slice startInt endInt (Vec.toArray elements)))))
       _, _, _ -> Left $ VMError TypeMismatch "LIST_SLICE requires a List and Integer bounds"
 
   MAP_NEW dst -> pure $ Tuple m (writeReg pNextPc dst (VMap Map.empty))
@@ -382,13 +384,13 @@ evalInstruction m p func inst =
   MAP_KEYS dst mapReg -> do
     vM <- readReg p mapReg
     case vM of
-      VMap entries -> pure $ Tuple m (writeReg pNextPc dst (VList (Set.toUnfoldable (Map.keys entries) :: Array Value)))
+      VMap entries -> pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (Set.toUnfoldable (Map.keys entries) :: Array Value))))
       _ -> Left $ VMError TypeMismatch "MAP_KEYS requires a Map"
 
   MAP_VALUES dst mapReg -> do
     vM <- readReg p mapReg
     case vM of
-      VMap entries -> pure $ Tuple m (writeReg pNextPc dst (VList (List.toUnfoldable (Map.values entries))))
+      VMap entries -> pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (List.toUnfoldable (Map.values entries)))))
       _ -> Left $ VMError TypeMismatch "MAP_VALUES requires a Map"
 
   MAP_SIZE dst mapReg -> do
@@ -498,7 +500,7 @@ evalInstruction m p func inst =
     pure $ Tuple m (writeReg pNextPc dst (VBool (Map.member path m.state)))
 
   STATE_KEYS dst _prefix ->
-    pure $ Tuple m (writeReg pNextPc dst (VList (VString <$> (Set.toUnfoldable (Map.keys m.state) :: Array String))))
+    pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (VString <$> (Set.toUnfoldable (Map.keys m.state) :: Array String)))))
 
   STATE_SNAPSHOT dst ->
     pure $ Tuple m (writeReg pNextPc dst (VString (Snapshot.createSnapshot m)))
@@ -517,16 +519,16 @@ evalInstruction m p func inst =
       _ -> Left $ VMError TypeMismatch "EVENT_EMIT requires an Event"
 
   EVENT_BATCH_NEW dst ->
-    pure $ Tuple m (writeReg pNextPc dst (VList []))
+    pure $ Tuple m (writeReg pNextPc dst (VList Vec.empty))
 
   EVENT_BATCH_APPEND dst batchReg eventReg -> do
     batch <- readReg p batchReg
     event <- readReg p eventReg
     case batch, event of
       VList events, VEvent _ ->
-        if Array.length events >= m.config.limits.maxEventsEmitted
+        if Vec.length events >= m.config.limits.maxEventsEmitted
           then Left $ VMError TraceLimitExceeded "EVENT_BATCH_APPEND exceeded maxEventsEmitted"
-          else pure $ Tuple m (writeReg pNextPc dst (VList (Array.snoc events event)))
+          else pure $ Tuple m (writeReg pNextPc dst (VList (Vec.snoc events event)))
       _, _ -> Left $ VMError TypeMismatch "EVENT_BATCH_APPEND requires a List and Event"
 
   EFFECT_NEW dst type_ payloadReg -> do
@@ -543,16 +545,16 @@ evalInstruction m p func inst =
       _ -> Left $ VMError TypeMismatch "EFFECT_REQUEST requires an EffectIntent"
 
   EFFECT_BATCH_NEW dst ->
-    pure $ Tuple m (writeReg pNextPc dst (VList []))
+    pure $ Tuple m (writeReg pNextPc dst (VList Vec.empty))
 
   EFFECT_BATCH_APPEND dst batchReg effectReg -> do
     batch <- readReg p batchReg
     effect <- readReg p effectReg
     case batch, effect of
       VList effects, VEffectIntent _ ->
-        if Array.length effects >= m.config.limits.maxEffectsRequested
+        if Vec.length effects >= m.config.limits.maxEffectsRequested
           then Left $ VMError TraceLimitExceeded "EFFECT_BATCH_APPEND exceeded maxEffectsRequested"
-          else pure $ Tuple m (writeReg pNextPc dst (VList (Array.snoc effects effect)))
+          else pure $ Tuple m (writeReg pNextPc dst (VList (Vec.snoc effects effect)))
       _, _ -> Left $ VMError TypeMismatch "EFFECT_BATCH_APPEND requires a List and EffectIntent"
 
   PROC_SELF dst -> pure $ Tuple m (writeReg pNextPc dst (VProcessRef p.pid))
@@ -623,7 +625,7 @@ evalInstruction m p func inst =
 
   PROC_RECEIVE dst -> do
     case Array.uncons p.mailbox of
-      Nothing -> 
+      Nothing ->
         -- Block process at the SAME PC so it retries when woken up
         pure $ Tuple m (p { status = ProcessWaiting WaitingForMessage })
       Just { head, tail } -> 
@@ -729,7 +731,7 @@ evalInstruction m p func inst =
       _ -> Left $ VMError TypeMismatch "NODE_STATUS requires a node String"
 
   NODE_KNOWN dst ->
-    pure $ Tuple m (writeReg pNextPc dst (VList [ VString "local" ]))
+    pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray [ VString "local" ])))
 
   REMOTE_PID_NEW dst nodeReg pidReg -> do
     vNode <- readReg p nodeReg
@@ -772,7 +774,7 @@ evalInstruction m p func inst =
           Nothing -> Left $ VMError UnknownFunction ("Unknown function: " <> targetId)
           Just f -> pure f
         let remotePid = "remote:" <> nodeName <> ":" <> targetId <> ":" <> show m.counters.steps
-            intent = { type_: "RemoteSpawnIntent", payload: VRecord (Map.fromFoldable [ Tuple "node" (VString nodeName), Tuple "function" (VString targetId), Tuple "args" (VList argVals), Tuple "pid" (VString remotePid) ]) }
+            intent = { type_: "RemoteSpawnIntent", payload: VRecord (Map.fromFoldable [ Tuple "node" (VString nodeName), Tuple "function" (VString targetId), Tuple "args" (VList (Vec.fromArray argVals)), Tuple "pid" (VString remotePid) ]) }
             m' = m { outbox = List.Cons intent m.outbox }
         pure $ Tuple m' (writeReg pNextPc dst (VRemoteProcessRef { node: NodeRef nodeName, pid: remotePid }))
       _ -> Left $ VMError TypeMismatch "NODE_SPAWN requires a node String"
@@ -1041,12 +1043,34 @@ runFunctionValue m callerPid functionId args = do
         ProcessTypes.ProcessCancelled reason -> Left $ VMError VMErrorCode.ProcessCancelled ("Function " <> functionId <> " cancelled: " <> show reason)
         ProcessRunning -> runLocal 0 currentMachine (currentProcess { status = ProcessReady }) (remaining - 1)
 
--- Helper to find a label's PC
-findLabel :: VMFunction.Function -> String -> Either VMError Int
-findLabel func label =
+-- Helper to find a label's PC.
+-- Uses the machine's precomputed per-function label cache for O(1) lookup when
+-- present, falling back to a linear scan of the instruction array otherwise
+-- (so callers that have not populated `labelCache` still work correctly).
+findLabel :: Machine -> VMFunction.Function -> String -> Either VMError Int
+findLabel m func label =
+  case Map.lookup func.id m.labelCache >>= Map.lookup label of
+    Just pc -> pure pc
+    Nothing -> scanLabel func label
+
+scanLabel :: VMFunction.Function -> String -> Either VMError Int
+scanLabel func label =
   let
     findIdx acc arr = case Array.uncons arr of
       Nothing -> Left $ VMError InvalidJump ("Label not found: " <> label)
       Just { head: LABEL l } | l == label -> pure acc
       Just { tail } -> findIdx (acc + 1) tail
   in findIdx 0 func.instructions
+
+-- | Build the label -> instruction-index map for one function.
+labelsForFunction :: VMFunction.Function -> Map.Map String Int
+labelsForFunction func =
+  Array.foldl step Map.empty (Array.mapWithIndex Tuple func.instructions)
+  where
+    step acc (Tuple idx inst) = case inst of
+      LABEL l -> Map.insert l idx acc
+      _ -> acc
+
+-- | Build the whole-program label cache: functionId -> (label -> index).
+buildLabelCache :: Program -> Map.Map String (Map.Map String Int)
+buildLabelCache program = map labelsForFunction program.functions

@@ -17,6 +17,8 @@
     "test": "npm run test:purs && npm run test:js",
     "test:purs": "spago test",
     "test:js": "node test/db_test.js",
+    "fuzz": "node test/fuzz.js",
+    "stress": "node bench/stress.js",
     "bench": "node bench/vm_vs_js_benchmark.js",
     "build": "spago build && esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer"
   },

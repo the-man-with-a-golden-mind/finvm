@@ -38,6 +38,11 @@ type Machine =
   , outbox :: List EffectIntent
   , events :: List Event
   , counters :: ExecutionCounters
+  -- Precomputed label -> instruction-index map per function, so JUMP targets
+  -- resolve in O(1) instead of scanning the instruction array on every jump.
+  -- Built once by `Eval.runMachine`; empty is a valid value (findLabel falls
+  -- back to a linear scan), so direct `stepProcess` callers need not populate it.
+  , labelCache :: Map String (Map String Int)
   }
 
 type ExecutionCertificate =

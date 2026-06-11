@@ -57,7 +57,7 @@ spec = do
       machine :: Boolean -> Machine
       machine perfMode =
         { program: program, scheduler: spawnProcess initialScheduler initialProcess, state: Map.empty, input: Map.empty, config: { limits: limits, externalBuiltins: Map.empty, performanceMode: perfMode }
-        , trace: List.Nil, proofTrace: List.Nil, outbox: List.Nil, events: List.Nil, counters: { steps: 0 }
+        , trace: List.Nil, proofTrace: List.Nil, outbox: List.Nil, events: List.Nil, counters: { steps: 0 }, labelCache: Map.empty
         }
 
     it "populates trace and proofTrace when performanceMode is false (Negative Case)" do

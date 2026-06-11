@@ -17,111 +17,138 @@ FinVM is a Universal Deterministic Virtual Machine implemented in PureScript.
 
 2. PROGRAM SCHEMA (JSON FORMAT)
 --------------------------------------------------------------------------------
-Your compiler must emit a JSON object matching this schema.
+This is the EXACT format accepted by the JSON runner (`finvm run <file.json>` /
+`runJsonProgram`). Constants and instructions use the TAGLESS / POSITIONAL form
+below (NOT a `{ "tag", "contents" }` form).
 
 {
   "version": "1.0",
+  "registerCount": 10,                 // registers for the implicit `main` function (must be >= arity)
+  "performanceMode": false,            // OPTIONAL: true disables tracing/proof recording for speed
+  "limits": { "maxSteps": 100000 },    // OPTIONAL: only `maxSteps` is read here (default 10000); other limits use built-in defaults
   "constants": [
-    { "tag": "VInt", "contents": "42" },
-    { "tag": "VString", "contents": "hello" }
+    { "int": "42" },
+    { "string": "hello" }
   ],
-  "functions": {
-    "main": {
-      "id": "main",
-      "arity": 0,
-      "registerCount": 10,
-      "parameterTypes": [],
-      "returnType": { "tag": "TUnit" },
-      "instructions": [
-        { "tag": "LOAD_CONST", "contents": [0, 0] },
-        { "tag": "HALT", "contents": 0 }
-      ],
-      "debug": { "name": "main" },
-      "proof": { "isInvariant": false }
-    }
-  },
-  "stateMachines": {},
-  "entrypoint": "main",
-  "exports": {},
-  "metadata": { "description": "Compiled by AI" },
-  "typeTable": {},
-  "capabilities": [],
-  "verification": { "verified": true }
+  "state": {},                         // OPTIONAL initial global state: { "key": <Value> }
+  "input": {},                         // OPTIONAL input map: { "key": <Value> }
+  "instructions": [
+    ["LOAD_CONST", 0, 0],
+    ["HALT", 0]
+  ]
 }
 
-3. DATA TYPES (The `Value` ADT)
+Notes:
+- Each instruction is a JSON ARRAY: ["OPCODE", ...args]. Equivalent object form: {"op":"OPCODE","args":[...]}.
+- The output of a run is a JSON object: { "status": "completed"|"failed"|"error", "steps": N, "result": <Value>, "state": { ... } }. The process exits non-zero on failed/error.
+
+MULTI-FUNCTION PROGRAMS (so CALL / TAIL_CALL / PROC_SPAWN can target named functions):
+Provide a top-level `functions` object instead of (or in addition to) top-level `instructions`.
+Each entry's KEY is the function id; its value is a spec. Set `entrypoint` (default "main").
+
+{
+  "version": "1.0",
+  "constants": [ { "int": "40" }, { "int": "2" } ],   // constants are PROGRAM-GLOBAL (shared by all functions)
+  "entrypoint": "main",
+  "performanceMode": false,
+  "functions": {
+    "main":   { "arity": 0, "registerCount": 4, "instructions": [
+                  ["LOAD_CONST",0,0], ["LOAD_CONST",1,1], ["CALL",2,"addTwo",[0,1]], ["RETURN",2] ] },
+    "addTwo": { "arity": 2, "registerCount": 4, "instructions": [ ["ADD",2,0,1], ["RETURN",2] ] }
+  }
+}
+
+Per-function spec fields: `arity` (default 0), `registerCount` (default max(16, arity); MUST be >= arity),
+`instructions` (required), optional `proof`: { "isInvariant": bool }. The id is the object key.
+Recursion (a function CALLing itself) and PROC_SPAWN of any defined function both work.
+(The simplified single-`main` form — top-level `instructions` + `registerCount`, no `functions` key — still works.)
+
+3. DATA TYPES (The `Value` ADT) — JSON ENCODING
 --------------------------------------------------------------------------------
-When defining `constants` or interpreting outputs, these are the VM Types:
-- VUnit
-- VBool (boolean)
-- VInt (BigInt, represented as string)
-- VFixed ({ value: BigInt, scale: Int })
-- VRational ({ numerator: BigInt, denominator: BigInt })
-- VString (string)
-- VBytes (Array of Ints)
-- VList (Array of Values)
-- VMap (Array of [Key, Value] tuples)
-- VRecord (Array of [StringKey, Value] tuples)
+These tagless encodings are used for `constants`, `state`, `input`, AND for the
+`result`/`state` you read back from a run (the codec round-trips them):
+- VUnit     -> null
+- VBool     -> { "bool": true }
+- VInt      -> { "int": "42" }            (decimal string; a bare safe JSON integer also decodes to VInt)
+- VFixed    -> { "fixed": { "value": "12345", "scale": 2 } }      (means 123.45)
+- VRational -> { "rational": { "numerator": "22", "denominator": "7" } }
+- VString   -> { "string": "hello" }
+- VSymbol   -> { "symbol": "name" }
+- VBytes    -> { "bytes": [1, 0, 2] }     (ints 0..255)
+- VList     -> { "list": [ <Value>, ... ] }
+- VMap      -> { "map": [ { "key": <Value>, "value": <Value> }, ... ] }
+- VRecord   -> { "record": { "field": <Value>, ... } }
+- VVariant  -> { "variant": { "tag": "Name", "payload": <Value> } }
+Note: an object with NONE of the keys above decodes as a VRecord of its fields.
 
 4. APPLICATION BINARY INTERFACE (ABI)
 --------------------------------------------------------------------------------
 - Function Arguments: When a function is called, the arguments are automatically placed in registers `0` through `arity - 1`.
 - Return Values: You MUST use the `RETURN <reg>` instruction to pass data back to the caller frame.
 - Temporary Variables: Allocate registers `arity` through `registerCount - 1` for local logic. Registers are zero-indexed.
+- CONSTRAINT: `registerCount` MUST be >= `arity` (validation rejects a function that declares fewer registers than parameters; otherwise arguments would be dropped).
 
 5. INSTRUCTION SET (Bytecode)
 --------------------------------------------------------------------------------
+WIRE FORMAT: every instruction is a JSON array ["OPCODE", ...args] in the order
+shown below. (The equivalent object form {"op":"OPCODE","args":[...]} is also
+accepted.) Registers are integers; labels/field names/keys are strings.
+
 Control Flow:
-- {"tag": "NOOP"}
-- {"tag": "HALT", "contents": [reg]} -> Stops VM, returns value in `reg`.
-- {"tag": "ABORT", "contents": [errorCode]} -> Crashes execution.
-- {"tag": "LABEL", "contents": ["loop_start"]}
-- {"tag": "JUMP", "contents": ["loop_start"]}
-- {"tag": "JUMP_IF", "contents": [condReg, "target_label"]}
-- {"tag": "JUMP_IF_FALSE", "contents": [condReg, "target_label"]}
-- {"tag": "CALL", "contents": [dstReg, "funcId", [argReg1, argReg2...]]}
-- {"tag": "TAIL_CALL", "contents": ["funcId", [argReg1, argReg2...]]}
-- {"tag": "RETURN", "contents": [reg]}
+- ["NOOP"]
+- ["HALT", reg] -> Stops VM, returns value in `reg`.
+- ["ABORT", errorCode] -> Crashes execution.
+- ["LABEL", "loop_start"]
+- ["JUMP", "loop_start"]
+- ["JUMP_IF", condReg, "target_label"]
+- ["JUMP_IF_FALSE", condReg, "target_label"]
+- ["CALL", dstReg, "funcId", [argReg1, argReg2...]]        (funcId must be defined in the `functions` map — see §2 multi-function)
+- ["TAIL_CALL", "funcId", [argReg1, argReg2...]]
+- ["RETURN", reg]
 
 Data Movement:
-- {"tag": "LOAD_CONST", "contents": [dstReg, constIndex]}
-- {"tag": "MOVE", "contents": [dstReg, srcReg]}
-- {"tag": "CLEAR", "contents": [dstReg]} -> Sets to VUnit
+- ["LOAD_CONST", dstReg, constIndex]
+- ["MOVE", dstReg, srcReg]
+- ["CLEAR", dstReg] -> Sets to VUnit
 
-Math & Logic: (Note: DIV requires a rounding mode like "RoundDown")
-- {"tag": "ADD", "contents": [dst, a, b]}
-- {"tag": "SUB", "contents": [dst, a, b]}
-- {"tag": "MUL", "contents": [dst, a, b]}
-- {"tag": "DIV", "contents": [dst, "RoundDown", a, b]}
-- {"tag": "EQ", "contents": [dst, a, b]}
-- {"tag": "LT", "contents": [dst, a, b]}
-- {"tag": "GT", "contents": [dst, a, b]}
+Math & Logic: (Note: DIV takes a rounding mode STRING at position 2)
+- ["ADD", dst, a, b]
+- ["SUB", dst, a, b]
+- ["MUL", dst, a, b]
+- ["DIV", dst, "RoundDown", a, b]   (modes: RoundDown, RoundUp, RoundTowardZero, RoundAwayFromZero, RoundHalfEven)
+- ["MOD", dst, a, b]
+- ["EQ", dst, a, b]
+- ["LT", dst, a, b]
+- ["GT", dst, a, b]
 
 Collections:
-- {"tag": "RECORD_NEW", "contents": [dst]}
-- {"tag": "RECORD_SET", "contents": [dst, recReg, "fieldName", valReg]}
-- {"tag": "RECORD_GET", "contents": [dst, recReg, "fieldName"]}
-- {"tag": "LIST_NEW", "contents": [dst]}
-- {"tag": "LIST_APPEND", "contents": [dst, listReg, valReg]}
-- {"tag": "LIST_GET", "contents": [dst, listReg, idxReg]}
+- ["RECORD_NEW", dst]
+- ["RECORD_SET", dst, recReg, "fieldName", valReg]
+- ["RECORD_GET", dst, recReg, "fieldName"]
+- ["LIST_NEW", dst]
+- ["LIST_APPEND", dst, listReg, valReg]   (amortized ~O(1); building a list of N is ~O(N))
+- ["LIST_GET", dst, listReg, idxReg]
+- ["LIST_LENGTH", dst, listReg]
 
 Global State (Simple Key-Value):
-- {"tag": "STATE_SET", "contents": ["key_string", srcReg]}
-- {"tag": "STATE_GET", "contents": [dst, "key_string"]}
+- ["STATE_SET", "key_string", srcReg]
+- ["STATE_GET", dst, "key_string"]
 
 Concurrency (Erlang-Style):
-- {"tag": "PROC_SPAWN", "contents": [dstReg, "funcId", [argRegs...]]} -> Puts ProcessID in dstReg.
-- {"tag": "PROC_SEND", "contents": [pidReg, msgReg]} -> Asynchronous.
-- {"tag": "PROC_RECEIVE", "contents": [dstReg]} -> Blocks until message arrives.
-- {"tag": "PROC_YIELD"} -> Voluntarily give up the execution slice.
+- ["PROC_SPAWN", dstReg, "funcId", [argRegs...]] -> Puts ProcessID in dstReg. (funcId must be defined in the `functions` map)
+- ["PROC_SEND", pidReg, msgReg] -> Asynchronous.
+- ["PROC_RECEIVE", dstReg] -> Blocks until message arrives.
+- ["PROC_YIELD"] -> Voluntarily give up the execution slice.
+  * A process monitoring another receives a DOWN message when it dies: VVariant "DOWN" { ref, pid, reason }.
 
 Builtins (FFI and System functions):
-- {"tag": "CALL_BUILTIN", "contents": [dstReg, "builtin.id@version", [argRegs...]]}
+- ["CALL_BUILTIN", dstReg, "builtin.id@version", [argRegs...]]
 
 6. STANDARD BUILTINS REGISTRY
 --------------------------------------------------------------------------------
 Math:
 - `bigint.modPow@1` (base, exp, mod) -> VInt
+  * Note: a negative exponent requires a modular inverse of `base`; if none exists it FAILS with a `NoModularInverse` error (it does NOT return 0).
 - `bigint.modInv@1` (a, m) -> VInt
 - `bigint.fromBytesBE@1` (bytes) -> VInt
 
@@ -138,7 +165,7 @@ Database FFI (Encrypted, Indexed, Persistent):
 - `db.query@1` ("tableName", queryRecord, optionsRecord) -> VList of VRecords
   * Note: queryRecord supports MongoDB style: `{"age": {"$gt": 30}}`.
 - `db.createIndex@1` ("tableName", "fieldName") -> VUnit
-- `db.hash@1` ("tableName") -> VString (Deterministic checksum of table)
+- `db.hash@1` ("tableName") -> VString (Deterministic SHA-256 checksum of table, 64 hex chars; rows sorted by id and canonicalized, so it is stable across runs and key-insertion order)
 
 Cache FFI (Ultra-Fast RAM Cache):
 - `cache.set@1` ("namespace", "key", val) -> VBool
@@ -152,3 +179,4 @@ Cache FFI (Ultra-Fast RAM Cache):
 3. Use the DB FFI (`db.query@1`) for massive data structures, and the global `STATE_SET` for lightweight configuration/status tracking.
 4. Avoid using `CALL` for basic operations (use provided opcodes).
 5. Output code should be thoroughly guarded. If an expected type doesn't match at runtime, the VM will throw a `TypeMismatch` error and halt the process.
+6. PERFORMANCE MODE: add `"performanceMode": true` at the top level of the program JSON to disable execution tracing and proof-trace recording for maximum speed. Use it for production/throughput runs where you do not need the step-by-step trace or proof events. Results are identical to a normal run (determinism is preserved); only the diagnostic trace/proofTrace are suppressed. Leave it off (default `false`) when debugging or when you need replay traces.

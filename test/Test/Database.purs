@@ -7,6 +7,7 @@ import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
 import Data.BigInt as BI
 import FinVM.Value (Value(..))
+import FinVM.Vec as Vec
 import FinVM.Builtin.Database as DB
 import Test.Spec (Spec, describe, it)
 import Test.Spec.Assertions (shouldEqual, fail)
@@ -21,7 +22,7 @@ spec = do
       mockUpdate t k v = Right (VBool true)
       mockDelete t k = Right (VBool true)
       mockCreateIndex t f = Right VUnit
-      mockQuery t q o = Right (VList [VRecord (Map.singleton "name" (VString "Alice"))])
+      mockQuery t q o = Right (VList (Vec.fromArray [VRecord (Map.singleton "name" (VString "Alice"))]))
       mockHash t = Right "abcd123"
 
       registry = DB.createDbRegistry 
@@ -65,6 +66,8 @@ spec = do
                 options = VRecord (Map.singleton "sort" (VRecord (Map.fromFoldable [Tuple "field" (VString "performance"), Tuple "order" (VString "ASC")])))
                 res = fn [VString "strategies", query, options]
             case res of
-              Right (VList [VRecord fields]) -> Map.lookup "name" fields `shouldEqual` Just (VString "Alice")
+              Right (VList v) -> case Vec.toArray v of
+                [VRecord fields] -> Map.lookup "name" fields `shouldEqual` Just (VString "Alice")
+                _ -> fail "Query failed to return expected list"
               _ -> fail "Query failed to return expected list"
           _ -> fail "v1 query not found"

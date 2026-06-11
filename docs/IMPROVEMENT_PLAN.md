@@ -8,6 +8,27 @@ _Audit date: 2026-06-11. Status at audit: `spago build` succeeds, `npm test` pas
 >
 > A VM-vs-native-JS-vs-DB benchmark was also added (`npm run bench`, `bench/vm_vs_js_benchmark.js`).
 
+## Performance (added after the initial plan)
+
+### P-1. 🟠 `performanceMode` was unreachable from the program/CLI path
+- **What:** The interpreter supports a `performanceMode` flag that skips per-step trace allocation and proof-trace recording, but the JSON entry point hardcoded `performanceMode: false` ([Json.purs `initialMachine`](../src/FinVM/Encoding/Json.purs)). So `finvm run`, `runJsonProgram`, and the benchmark could never enable it.
+- **Fix:** `decodeProgramFile` now reads a top-level `"performanceMode": true|false` (default false) and threads it into the machine config. Documented in [LLM.txt](../LLM.txt) and [README](../README.md). Tested: the flag is honored and results are identical with it on vs off. Measured **~1.4x** faster on the arithmetic-loop benchmark.
+
+### P-2. 🟠 `findLabel` scanned instructions linearly on every jump (O(n) per jump)
+- **What:** `JUMP`/`JUMP_IF*` resolved labels by scanning the instruction array from index 0 every time a jump was taken — O(instructions) per jump, so jump-heavy or large functions paid a compounding cost.
+- **Fix:** A per-function `label -> index` cache (`Machine.labelCache`) is built once by `Eval.runMachine`; `findLabel` does an O(1) lookup with a linear-scan fallback (so direct `stepProcess` callers still work). The benchmark's "Label resolution" section shows jump cost is now flat in program size (far/near ≈ 1.0x) instead of growing with it.
+
+### P-3. 🟠 LIST_APPEND was O(n) per append → O(n²) list building
+- **What:** `VList` was backed by an immutable `Array`, so `LIST_APPEND` (`Array.snoc`) copied the whole array each call; building an N-element list by appending was O(N²) (50k elements ≈ 4.3s — found by `npm run stress`).
+- **Fix:** Introduced `FinVM.Vec` — a persistent chunked vector (fixed-size blocks + partial tail). Index/length are O(1), append is amortized ~O(1), and building N elements is ~O(N). `Eq`/`Ord`/`Show` are defined over the logical sequence so list comparison/hashing/display are byte-for-byte unchanged. `VList`'s payload is now `Vec Value`; the codec, canonical encoder, and all interpreter list ops were migrated. Result: **50k-element build 4.3s → ~0.15s (~30×), now scales linearly.** Verified by `npm run stress` (sizes 25k/50k/100k ≈ 96/159/289 ms) and 10k-program fuzz remains crash-free and deterministic.
+
+### P-4. 🟢 Multi-function JSON programs (CALL / TAIL_CALL / PROC_SPAWN)
+- **What:** The JSON runner only built a single implicit `main`, so calls to other functions failed with UnknownFunction.
+- **Fix:** `decodeProgramFile` now accepts a top-level `functions` object (id → spec with arity/registerCount/instructions/proof) plus an `entrypoint`; constants stay program-global. The simplified single-`main` form still works. Recursion and `PROC_SPAWN` of defined functions verified end-to-end (factorial conformance test). Documented in `LLM.txt` §2.
+
+### Further speedups (not done — would require larger changes)
+- The core cost is the pure tree-walking design: each step rebuilds immutable `Machine`/`Process` records and `Array.updateAt` copies the register array per write. A mutable-register fast path or bytecode pre-decoding would help but is a larger redesign that trades away some of the current simplicity.
+
 This plan is prioritized. Each item lists **what**, **why**, **where**, and a **concrete fix**. Severities: 🔴 critical · 🟠 high · 🟡 medium · 🔵 low/polish.
 
 ---

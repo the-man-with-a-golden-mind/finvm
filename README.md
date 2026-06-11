@@ -53,6 +53,15 @@ finvm run <file.json>   # run a JSON bytecode program
 finvm bench             # run the built-in statistics/graph benchmarks
 ```
 
+### Performance mode
+
+For throughput runs, add `"performanceMode": true` at the top level of the
+program JSON. This disables per-step execution tracing and proof-trace
+recording (the main per-instruction overhead) while producing **identical**
+results — determinism is preserved; only the diagnostic trace is suppressed.
+Leave it off (the default) when you need traces for debugging or replay. See
+`npm run bench` for the measured speedup.
+
 The runner prints a JSON result and exits non-zero if the program fails or the file cannot be read:
 
 ```sh

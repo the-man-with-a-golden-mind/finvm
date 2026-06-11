@@ -8,6 +8,7 @@ import FinVM.Numeric.BigInt (BigInt)
 import FinVM.Numeric.Fixed (Fixed)
 import FinVM.Numeric.Rational (Rational)
 import FinVM.StateMachine.Instance (MachineInstance)
+import FinVM.Vec (Vec)
 
 type Bytes = Array Int -- Simplified for now, or could use ArrayBuffer
 
@@ -38,7 +39,7 @@ data Value
   | VString String
   | VBytes Bytes
   | VSymbol String
-  | VList (Array Value)
+  | VList (Vec Value)
   | VMap (Map Value Value)
   | VRecord (Map String Value)
   | VVariant String Value

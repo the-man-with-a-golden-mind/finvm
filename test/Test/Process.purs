@@ -106,7 +106,7 @@ spec = do
         , proofTrace: List.Nil
         , outbox: List.Nil
         , events: List.Nil
-        , counters: { steps: 0 }
+        , counters: { steps: 0 }, labelCache: Map.empty
         }
 
     it "executes a simple spawn and message pass (ping-pong sequence)" do
