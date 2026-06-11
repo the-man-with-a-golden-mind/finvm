@@ -135,8 +135,7 @@ These are intentional, scoped-out items (not oversights):
 - **`db.*` / `cache.*` not wired into the CLI** — `Main` runs with
   `externalBuiltins: Map.empty`. The registries exist; injecting `nativeDb`/
   `nativeCache` would make the documented builtins usable from `finvm run`.
-- **Only `maxSteps` is configurable from JSON** — exposing the rest of `EvalLimits`
-  is a small addition.
+- ~~**Only `maxSteps` is configurable from JSON**~~ — RESOLVED in ADR-0013.
 - **No multi-function type checking** — `parameterTypes`/`returnType` default to
   `TAny`; only `arity` is enforced at call sites.
 
@@ -155,4 +154,17 @@ activates the validation that was previously dead on the CLI path.
 **Consequence.** Programs that previously ran "loosely" (e.g. relying on a dropped
 OOB write) now fail fast. All 90 specs + the fuzzer (valid-by-construction programs)
 still pass; builtin availability remains a runtime check.
+
+---
+## ADR-0013 — All `EvalLimits` are configurable from program JSON
+**Context.** `decodeLimits` read only `maxSteps`; the other 16 limits were
+hardcoded, so a program couldn't, say, raise `maxListLength` or tighten
+`maxProcesses`.
+**Decision.** Read every `EvalLimits` field from the top-level `limits` object;
+each is optional and falls back to its previous default. An absent `limits` object
+uses all defaults (unchanged behavior).
+**Consequence.** Compilers/hosts can size the VM to the workload. Covered by a
+conformance test (a custom `maxListLength` trips where the default would allow it).
+Note: limit values are not range-checked; a nonsensical value (e.g. negative) just
+makes the corresponding guard trip immediately.
 </content>

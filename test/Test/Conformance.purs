@@ -37,6 +37,18 @@ spec = do
             Just error -> (error == "Unsupported instruction opcode: DOES_NOT_EXIST") `shouldEqual` true
             Nothing -> fail ("missing error in output: " <> output)
 
+    it "honors a custom limit from the program JSON (maxListLength)" do
+      -- LIST_FROM with 3 elements under maxListLength:2 must fail; the default
+      -- (100000) would allow it, proving the limit came from the JSON.
+      let output = Encoding.Json.runJsonProgram listLimitProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "failed"
+          case fieldString "error" object of
+            Just e -> contains (Pattern "maxListLength") e `shouldEqual` true
+            Nothing -> fail ("missing error in output: " <> output)
+
     it "statically validates before running (rejects an out-of-bounds register)" do
       -- Register 5 is out of bounds for registerCount 1. Without validation the VM
       -- would silently drop the write and complete; with validation it fails fast.
@@ -135,6 +147,24 @@ hashProgram =
       ["LOAD_CONST", 0, 0],
       ["CALL_BUILTIN", 1, "hash.sha256@1", [0]],
       ["RETURN", 1]
+    ]
+  }
+  """
+
+listLimitProgram :: String
+listLimitProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 5,
+    "limits": { "maxListLength": 2 },
+    "constants": [ { "int": "1" } ],
+    "instructions": [
+      ["LOAD_CONST", 0, 0],
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 0],
+      ["LIST_FROM", 3, [0, 1, 2]],
+      ["RETURN", 3]
     ]
   }
   """

@@ -38,8 +38,9 @@ npm run bench       # FinVM vs native JS, and VM-DB vs native data structures
    UnknownBuiltin via `finvm run`. The registries exist
    (`FinVM.Builtin.Database.createDbRegistry`, `…Cache.createCacheRegistry`) but
    are only used in unit tests. (Known gap — see [DECISIONS.md](DECISIONS.md).)
-5. **Only `maxSteps` is configurable from JSON** (`"limits":{"maxSteps":N}`); all
-   other limits use the hardcoded defaults in `decodeLimits`.
+5. **All `EvalLimits` are configurable** via the top-level `limits` object — each
+   field is optional and falls back to its default (`decodeLimits`). E.g.
+   `"limits": { "maxSteps": N, "maxListLength": M, "maxProcesses": P }`.
 6. **Lists are `FinVM.Vec`, not `Array`.** `VList` wraps a chunked vector. Use
    `Vec.fromArray`/`Vec.toArray`/`Vec.snoc`/`Vec.index`/`Vec.length`, never
    `Array.*`, when constructing/inspecting `VList`.

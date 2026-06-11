@@ -476,27 +476,50 @@ traverseObject f object =
   where
     decodePair (Tuple key value) = Tuple key <$> f value
 
+-- | Decode the optional top-level `limits` object. Every field is optional and
+-- | falls back to its default; an absent `limits` object uses all defaults.
 decodeLimits :: Object Json.Json -> Either String EvalLimits
 decodeLimits object = do
-  maxSteps <- optionalNestedInt "limits" "maxSteps" object <#> fromMaybe 10000
+  let
+    limitsObj = Object.lookup "limits" object >>= Json.toObject
+    lim name def = case limitsObj of
+      Nothing -> pure def
+      Just lo -> optionalInt name lo <#> fromMaybe def
+  maxSteps <- lim "maxSteps" 10000
+  maxCallDepth <- lim "maxCallDepth" 256
+  maxProcesses <- lim "maxProcesses" 1024
+  maxProcessStepsPerSlice <- lim "maxProcessStepsPerSlice" 100
+  maxRegistersPerFrame <- lim "maxRegistersPerFrame" 1024
+  maxFrames <- lim "maxFrames" 1024
+  maxListLength <- lim "maxListLength" 100000
+  maxMapSize <- lim "maxMapSize" 100000
+  maxRecordFields <- lim "maxRecordFields" 10000
+  maxValueDepth <- lim "maxValueDepth" 100
+  maxStateEntries <- lim "maxStateEntries" 100000
+  maxTraceEvents <- lim "maxTraceEvents" 100000
+  maxProofEvents <- lim "maxProofEvents" 100000
+  maxMailboxSize <- lim "maxMailboxSize" 10000
+  maxRemoteNodes <- lim "maxRemoteNodes" 1024
+  maxEventsEmitted <- lim "maxEventsEmitted" 10000
+  maxEffectsRequested <- lim "maxEffectsRequested" 10000
   pure
     { maxSteps
-    , maxCallDepth: 256
-    , maxProcesses: 1024
-    , maxProcessStepsPerSlice: 100
-    , maxRegistersPerFrame: 1024
-    , maxFrames: 1024
-    , maxListLength: 100000
-    , maxMapSize: 100000
-    , maxRecordFields: 10000
-    , maxValueDepth: 100
-    , maxStateEntries: 100000
-    , maxTraceEvents: 100000
-    , maxProofEvents: 100000
-    , maxMailboxSize: 10000
-    , maxRemoteNodes: 1024
-    , maxEventsEmitted: 10000
-    , maxEffectsRequested: 10000
+    , maxCallDepth
+    , maxProcesses
+    , maxProcessStepsPerSlice
+    , maxRegistersPerFrame
+    , maxFrames
+    , maxListLength
+    , maxMapSize
+    , maxRecordFields
+    , maxValueDepth
+    , maxStateEntries
+    , maxTraceEvents
+    , maxProofEvents
+    , maxMailboxSize
+    , maxRemoteNodes
+    , maxEventsEmitted
+    , maxEffectsRequested
     }
 
 valueToJson :: Value -> Json.Json
@@ -559,11 +582,6 @@ optionalBool :: String -> Object Json.Json -> Either String (Maybe Boolean)
 optionalBool key object = case Object.lookup key object of
   Nothing -> pure Nothing
   Just value -> Just <$> asBool key value
-
-optionalNestedInt :: String -> String -> Object Json.Json -> Either String (Maybe Int)
-optionalNestedInt objectKey key object = case Object.lookup objectKey object >>= Json.toObject of
-  Nothing -> pure Nothing
-  Just nested -> optionalInt key nested
 
 requiredString :: String -> Object Json.Json -> Either String String
 requiredString key object = case Object.lookup key object of

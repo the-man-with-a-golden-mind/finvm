@@ -130,11 +130,12 @@ the host interprets them.
 
 ## 6. Resource limits
 `src/FinVM/Limits.purs`; defaults set in `decodeLimits` (`Encoding/Json.purs`).
-Only `maxSteps` is configurable from program JSON today.
+Every limit below can be overridden via the top-level `limits` object in program
+JSON (each field optional; absent fields use the default).
 
 | Limit | Default | Enforced on |
 |---|---|---|
-| `maxSteps` | 10000 (configurable) | total executed instructions |
+| `maxSteps` | 10000 | total executed instructions |
 | `maxCallDepth` / `maxFrames` | 256 / 1024 | call stack depth |
 | `maxProcesses` | 1024 | live processes |
 | `maxProcessStepsPerSlice` | 100 | fairness per scheduling slice |

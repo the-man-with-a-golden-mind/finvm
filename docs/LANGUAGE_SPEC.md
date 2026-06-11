@@ -16,7 +16,7 @@ execution model) and mirrors the compact `../LLM.txt`.
   "version": "1.0",
   "registerCount": 10,                 // registers for the implicit `main` (>= arity)
   "performanceMode": false,            // optional: disables tracing/proofs for speed
-  "limits": { "maxSteps": 100000 },    // optional: only maxSteps is read (default 10000)
+  "limits": { "maxSteps": 100000 },    // optional: any EvalLimits field; absent fields use defaults
   "constants": [ { "int": "42" }, { "string": "hi" } ],
   "state": {},                         // optional: { "key": <Value> }
   "input": {},                         // optional: { "key": <Value> }
@@ -122,7 +122,9 @@ An object with none of these keys decodes as a `VRecord` of its fields.
   with no external builtins. `CALL_BUILTIN "db.insert@1"` will fail with
   `UnknownBuiltin` unless a host wires the registries (see
   [DECISIONS.md](DECISIONS.md) / [DATABASE.md](DATABASE.md)).
-- **Only `maxSteps` is configurable from JSON**; other limits use defaults.
+- **Limits are configurable** — set any `EvalLimits` field in the top-level
+  `limits` object (e.g. `maxListLength`, `maxProcesses`, `maxCallDepth`); omitted
+  fields use defaults. See [VM_SPEC.md](VM_SPEC.md) §6.
 - **Distribution opcodes** (`NODE_*`/remote) produce intents/metadata only; there is
   no built-in transport.
 </content>
