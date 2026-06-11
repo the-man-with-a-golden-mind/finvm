@@ -28,9 +28,11 @@ npm run bench       # FinVM vs native JS, and VM-DB vs native data structures
    `{"int":"42"}`; instructions are `["ADD",dst,a,b]`. The only decoder is
    `decodeProgramFile` in `src/FinVM/Encoding/Json.purs`. See
    [LANGUAGE_SPEC.md](LANGUAGE_SPEC.md).
-3. **The CLI does NOT call `validateProgram`.** `runJsonProgram` decodes then runs
-   directly, so malformed programs surface as *runtime* errors, not validation
-   errors. `FinVM.Validate` is only exercised by tests.
+3. **The CLI validates before running.** `runJsonProgram` runs
+   `FinVM.Validate.validateProgram` after decode, so structural problems (unknown
+   function/label, arity mismatch, out-of-bounds register, `registerCount < arity`)
+   surface as a `failed` status *before* execution rather than as opaque runtime
+   errors. (Builtin availability is still checked at call time, not validation.)
 4. **`db.*` and `cache.*` builtins are NOT wired into the CLI.** `initialMachine`
    sets `externalBuiltins: Map.empty`, so `CALL_BUILTIN "db.insert@1"` fails with
    UnknownBuiltin via `finvm run`. The registries exist

@@ -33,6 +33,7 @@ import FinVM.Numeric.Rounding (Rounding(..))
 import FinVM.Process (Process, ProcessStatus(..))
 import FinVM.Process.Scheduler as Scheduler
 import FinVM.Program (Program)
+import FinVM.Validate as Validate
 import FinVM.Registers (emptyRegisters)
 import FinVM.State (VMInput, VMState)
 import FinVM.Type (VMType(..))
@@ -132,28 +133,33 @@ errorJson msg = Json.stringify $ objectJson
 runJsonProgramResult :: String -> { ok :: Boolean, output :: String }
 runJsonProgramResult source =
   case decodeProgramFile source of
-    Left err ->
-      { ok: false
-      , output: Json.stringify $ objectJson [ Tuple "status" (Json.fromString "failed"), Tuple "error" (Json.fromString err) ]
-      }
+    Left err -> failed err
     Right file ->
-      case Eval.runMachine (initialMachine file) of
-        Left err ->
-          { ok: false
-          , output: Json.stringify $ objectJson
-              [ Tuple "status" (Json.fromString "failed")
-              , Tuple "error" (Json.fromString (renderVMError err))
-              ]
-          }
-        Right machine ->
-          { ok: true
-          , output: Json.stringify $ objectJson
-              [ Tuple "status" (Json.fromString "completed")
-              , Tuple "steps" (Json.fromNumber (Int.toNumber machine.counters.steps))
-              , Tuple "result" (valueToJson (mainResult machine))
-              , Tuple "state" (stringMapToJson machine.state)
-              ]
-          }
+      -- Static validation before execution gives clear, up-front diagnostics
+      -- (unknown function/builtin target, arity mismatch, out-of-bounds register,
+      -- registerCount < arity, unknown jump label) instead of opaque runtime errors.
+      case Validate.validateProgram file.program of
+        Left vErr -> failed (renderVMError vErr)
+        Right _ ->
+          case Eval.runMachine (initialMachine file) of
+            Left err -> failed (renderVMError err)
+            Right machine ->
+              { ok: true
+              , output: Json.stringify $ objectJson
+                  [ Tuple "status" (Json.fromString "completed")
+                  , Tuple "steps" (Json.fromNumber (Int.toNumber machine.counters.steps))
+                  , Tuple "result" (valueToJson (mainResult machine))
+                  , Tuple "state" (stringMapToJson machine.state)
+                  ]
+              }
+  where
+    failed msg =
+      { ok: false
+      , output: Json.stringify $ objectJson
+          [ Tuple "status" (Json.fromString "failed")
+          , Tuple "error" (Json.fromString msg)
+          ]
+      }
 
 mkMainFunction :: Int -> Array Instruction -> VMFunction.Function
 mkMainFunction registerCount instructions =

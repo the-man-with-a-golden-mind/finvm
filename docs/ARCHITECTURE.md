@@ -22,8 +22,9 @@ finvm run file.json
                            └─ evalInstruction (the ~100-case dispatch)
        └─ encode result → { status, steps, result, state } JSON
 ```
-Note: `runJsonProgram` does **not** call `FinVM.Validate.validateProgram`; the CLI
-trusts the program and surfaces problems as runtime `VMError`s.
+Note: `runJsonProgram` runs `FinVM.Validate.validateProgram` after decode and
+before `runMachine`, so structural errors are reported as a `failed` status up
+front; only builtin availability is left to runtime (`CALL_BUILTIN`).
 
 ## Core types
 - **`Machine`** (`Machine.purs`): `program`, `scheduler`, `state` (global K/V),

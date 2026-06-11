@@ -131,9 +131,7 @@ multi-function programs (recursion verified). See
 ---
 ## ADR-0011 — Known gaps deliberately left open
 These are intentional, scoped-out items (not oversights):
-- **CLI does not run `validateProgram`** — programs fail at runtime, not with
-  up-front validation. Wiring validation into `runJsonProgram` would improve
-  diagnostics (low risk, good next step).
+- ~~**CLI does not run `validateProgram`**~~ — RESOLVED in ADR-0012.
 - **`db.*` / `cache.*` not wired into the CLI** — `Main` runs with
   `externalBuiltins: Map.empty`. The registries exist; injecting `nativeDb`/
   `nativeCache` would make the documented builtins usable from `finvm run`.
@@ -141,4 +139,20 @@ These are intentional, scoped-out items (not oversights):
   is a small addition.
 - **No multi-function type checking** — `parameterTypes`/`returnType` default to
   `TAny`; only `arity` is enforced at call sites.
+
+---
+## ADR-0012 — The CLI validates before running
+**Context.** `runJsonProgram` decoded and executed directly; `FinVM.Validate` (incl.
+the `registerCount >= arity` check from ADR-0004) was only exercised by tests, so
+malformed programs surfaced as opaque runtime errors — or, for an out-of-bounds
+register, *silently completed with the wrong result* (the interpreter's `writeReg`
+drops an out-of-range write).
+**Decision.** `runJsonProgramResult` runs `validateProgram` after decode and before
+`runMachine`; a validation `VMError` is returned as a `failed` status (CLI exit 1).
+**Rationale.** Clear up-front diagnostics for compiler authors (unknown
+function/label, arity mismatch, OOB register, registerCount < arity), and it
+activates the validation that was previously dead on the CLI path.
+**Consequence.** Programs that previously ran "loosely" (e.g. relying on a dropped
+OOB write) now fail fast. All 90 specs + the fuzzer (valid-by-construction programs)
+still pass; builtin availability remains a runtime check.
 </content>

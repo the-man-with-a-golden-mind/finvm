@@ -114,9 +114,10 @@ An object with none of these keys decodes as a `VRecord` of its fields.
   death.
 
 ## 6. Current limitations to plan around
-- **`finvm run` does not validate** — malformed programs fail at runtime, not with
-  up-front validation messages. (Validation logic exists in `FinVM.Validate` but is
-  not on the CLI path.)
+- **`finvm run` validates up front** — `validateProgram` runs after decode, so
+  unknown function/label, arity mismatch, out-of-bounds register, and
+  `registerCount < arity` are reported as a `failed` status before execution.
+  (Builtin availability is still only checked when a `CALL_BUILTIN` executes.)
 - **`db.*` / `cache.*` builtins are not available via `finvm run`** — the CLI runs
   with no external builtins. `CALL_BUILTIN "db.insert@1"` will fail with
   `UnknownBuiltin` unless a host wires the registries (see
