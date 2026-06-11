@@ -1,0 +1,43 @@
+{
+  "name": "finvm",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "finvm": "./bin/finvm.js"
+  },
+  "main": "dist/finvm-core.js",
+  "files": [
+    "dist",
+    "bin",
+    "src/FinVM/FFI",
+    "docs",
+    "LLM.txt"
+  ],
+  "scripts": {
+    "test": "npm run test:purs && npm run test:js",
+    "test:purs": "spago test",
+    "test:js": "node test/db_test.js",
+    "bench": "node bench/vm_vs_js_benchmark.js",
+    "build": "spago build && esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer"
+  },
+  "keywords": [
+    "vm",
+    "bytecode",
+    "deterministic",
+    "interpreter",
+    "purescript",
+    "bigint",
+    "state-machine"
+  ],
+  "author": "Michal Majchrzak <michmajchrzak@gmail.com>",
+  "license": "ISC",
+  "description": "FinVM — a universal deterministic register-based virtual machine.",
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "purescript": "^0.15.16",
+    "spago": "^0.21.0"
+  },
+  "dependencies": {
+    "big-integer": "^1.6.52"
+  }
+}

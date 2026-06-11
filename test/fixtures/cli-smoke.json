@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "registerCount": 4,
+  "constants": [
+    { "int": "40" },
+    { "int": "2" }
+  ],
+  "instructions": [
+    ["LOAD_CONST", 0, 0],
+    ["LOAD_CONST", 1, 1],
+    ["ADD", 2, 0, 1],
+    ["STATE_SET", "answer", 2],
+    ["RETURN", 2]
+  ]
+}

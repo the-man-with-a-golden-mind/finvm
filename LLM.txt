@@ -1,0 +1,154 @@
+================================================================================
+FINVM COMPILER TARGET SPECIFICATION - LLM CONTEXT FILE
+================================================================================
+TARGET AUDIENCE: AI / LLM Compiler Engineers
+PURPOSE: Provide all necessary context to build a high-level programming language 
+         that compiles down to FinVM bytecode.
+================================================================================
+
+1. ARCHITECTURAL OVERVIEW
+--------------------------------------------------------------------------------
+FinVM is a Universal Deterministic Virtual Machine implemented in PureScript.
+- Register-Based: Fast O(1) access. Functions define a strict `registerCount`.
+- Deterministic: Same input + state always yields the same output. No wall-clock, no RNG.
+- BigInt Native: All standard integers are infinite-precision BigInts.
+- Concurrency: Erlang-style lightweight processes, message passing, and mailboxes.
+- Purity: The VM core cannot perform IO. Side effects are returned as "Intents" or handled via FFI.
+
+2. PROGRAM SCHEMA (JSON FORMAT)
+--------------------------------------------------------------------------------
+Your compiler must emit a JSON object matching this schema.
+
+{
+  "version": "1.0",
+  "constants": [
+    { "tag": "VInt", "contents": "42" },
+    { "tag": "VString", "contents": "hello" }
+  ],
+  "functions": {
+    "main": {
+      "id": "main",
+      "arity": 0,
+      "registerCount": 10,
+      "parameterTypes": [],
+      "returnType": { "tag": "TUnit" },
+      "instructions": [
+        { "tag": "LOAD_CONST", "contents": [0, 0] },
+        { "tag": "HALT", "contents": 0 }
+      ],
+      "debug": { "name": "main" },
+      "proof": { "isInvariant": false }
+    }
+  },
+  "stateMachines": {},
+  "entrypoint": "main",
+  "exports": {},
+  "metadata": { "description": "Compiled by AI" },
+  "typeTable": {},
+  "capabilities": [],
+  "verification": { "verified": true }
+}
+
+3. DATA TYPES (The `Value` ADT)
+--------------------------------------------------------------------------------
+When defining `constants` or interpreting outputs, these are the VM Types:
+- VUnit
+- VBool (boolean)
+- VInt (BigInt, represented as string)
+- VFixed ({ value: BigInt, scale: Int })
+- VRational ({ numerator: BigInt, denominator: BigInt })
+- VString (string)
+- VBytes (Array of Ints)
+- VList (Array of Values)
+- VMap (Array of [Key, Value] tuples)
+- VRecord (Array of [StringKey, Value] tuples)
+
+4. APPLICATION BINARY INTERFACE (ABI)
+--------------------------------------------------------------------------------
+- Function Arguments: When a function is called, the arguments are automatically placed in registers `0` through `arity - 1`.
+- Return Values: You MUST use the `RETURN <reg>` instruction to pass data back to the caller frame.
+- Temporary Variables: Allocate registers `arity` through `registerCount - 1` for local logic. Registers are zero-indexed.
+
+5. INSTRUCTION SET (Bytecode)
+--------------------------------------------------------------------------------
+Control Flow:
+- {"tag": "NOOP"}
+- {"tag": "HALT", "contents": [reg]} -> Stops VM, returns value in `reg`.
+- {"tag": "ABORT", "contents": [errorCode]} -> Crashes execution.
+- {"tag": "LABEL", "contents": ["loop_start"]}
+- {"tag": "JUMP", "contents": ["loop_start"]}
+- {"tag": "JUMP_IF", "contents": [condReg, "target_label"]}
+- {"tag": "JUMP_IF_FALSE", "contents": [condReg, "target_label"]}
+- {"tag": "CALL", "contents": [dstReg, "funcId", [argReg1, argReg2...]]}
+- {"tag": "TAIL_CALL", "contents": ["funcId", [argReg1, argReg2...]]}
+- {"tag": "RETURN", "contents": [reg]}
+
+Data Movement:
+- {"tag": "LOAD_CONST", "contents": [dstReg, constIndex]}
+- {"tag": "MOVE", "contents": [dstReg, srcReg]}
+- {"tag": "CLEAR", "contents": [dstReg]} -> Sets to VUnit
+
+Math & Logic: (Note: DIV requires a rounding mode like "RoundDown")
+- {"tag": "ADD", "contents": [dst, a, b]}
+- {"tag": "SUB", "contents": [dst, a, b]}
+- {"tag": "MUL", "contents": [dst, a, b]}
+- {"tag": "DIV", "contents": [dst, "RoundDown", a, b]}
+- {"tag": "EQ", "contents": [dst, a, b]}
+- {"tag": "LT", "contents": [dst, a, b]}
+- {"tag": "GT", "contents": [dst, a, b]}
+
+Collections:
+- {"tag": "RECORD_NEW", "contents": [dst]}
+- {"tag": "RECORD_SET", "contents": [dst, recReg, "fieldName", valReg]}
+- {"tag": "RECORD_GET", "contents": [dst, recReg, "fieldName"]}
+- {"tag": "LIST_NEW", "contents": [dst]}
+- {"tag": "LIST_APPEND", "contents": [dst, listReg, valReg]}
+- {"tag": "LIST_GET", "contents": [dst, listReg, idxReg]}
+
+Global State (Simple Key-Value):
+- {"tag": "STATE_SET", "contents": ["key_string", srcReg]}
+- {"tag": "STATE_GET", "contents": [dst, "key_string"]}
+
+Concurrency (Erlang-Style):
+- {"tag": "PROC_SPAWN", "contents": [dstReg, "funcId", [argRegs...]]} -> Puts ProcessID in dstReg.
+- {"tag": "PROC_SEND", "contents": [pidReg, msgReg]} -> Asynchronous.
+- {"tag": "PROC_RECEIVE", "contents": [dstReg]} -> Blocks until message arrives.
+- {"tag": "PROC_YIELD"} -> Voluntarily give up the execution slice.
+
+Builtins (FFI and System functions):
+- {"tag": "CALL_BUILTIN", "contents": [dstReg, "builtin.id@version", [argRegs...]]}
+
+6. STANDARD BUILTINS REGISTRY
+--------------------------------------------------------------------------------
+Math:
+- `bigint.modPow@1` (base, exp, mod) -> VInt
+- `bigint.modInv@1` (a, m) -> VInt
+- `bigint.fromBytesBE@1` (bytes) -> VInt
+
+Logic:
+- `logic.and@1` (a, b) -> VBool
+- `logic.or@1` (a, b) -> VBool
+- `logic.not@1` (a) -> VBool
+
+Database FFI (Encrypted, Indexed, Persistent):
+- `db.insert@1` ("tableName", recordVal) -> VString (inserted ID)
+- `db.get@1` ("tableName", idString) -> VRecord
+- `db.update@1` ("tableName", idString, newRecordVal) -> VBool
+- `db.delete@1` ("tableName", idString) -> VBool
+- `db.query@1` ("tableName", queryRecord, optionsRecord) -> VList of VRecords
+  * Note: queryRecord supports MongoDB style: `{"age": {"$gt": 30}}`.
+- `db.createIndex@1` ("tableName", "fieldName") -> VUnit
+- `db.hash@1` ("tableName") -> VString (Deterministic checksum of table)
+
+Cache FFI (Ultra-Fast RAM Cache):
+- `cache.set@1` ("namespace", "key", val) -> VBool
+- `cache.get@1` ("namespace", "key") -> Value | Null
+- `cache.delete@1` ("namespace", "key") -> VBool
+
+7. COMPILER OPTIMIZATION GUIDELINES
+--------------------------------------------------------------------------------
+1. Map high-level variables strictly to Registers. Reuse registers when variables go out of scope to keep `registerCount` low.
+2. The VM is tail-call optimized. Compile loops to `JUMP` and recursive calls to `TAIL_CALL`.
+3. Use the DB FFI (`db.query@1`) for massive data structures, and the global `STATE_SET` for lightweight configuration/status tracking.
+4. Avoid using `CALL` for basic operations (use provided opcodes).
+5. Output code should be thoroughly guarded. If an expected type doesn't match at runtime, the VM will throw a `TypeMismatch` error and halt the process.
