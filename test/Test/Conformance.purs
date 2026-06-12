@@ -27,6 +27,32 @@ spec = do
             Just value -> value `shouldEqual` "42"
             Nothing -> fail ("missing answer in output: " <> output)
 
+    it "PROC_SELF returns the running process's own pid (root process)" do
+      let output = Encoding.Json.runJsonProgram selfProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          -- root process pid is "main"; PROC_SELF yields a VProcessRef of it
+          resultProcess object `shouldEqual` Just "main"
+          stateProcess "me" object `shouldEqual` Just "main"
+
+    it "PROC_SELF and PROC_SPAWN agree on pid identity (cross-process round-trip)" do
+      -- parent spawns child (passing its own pid as an arg); child PROC_SELFs and
+      -- sends its own pid back; parent asserts the received pid == the pid that
+      -- PROC_SPAWN returned for that child.
+      let output = Encoding.Json.runJsonProgram selfRoundTripProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          stateProcess "received" object `shouldEqual` stateProcess "spawned" object
+          stateProcess "received" object `shouldEqual` Just "p0"
+
+    it "PROC_SELF is deterministic across identical runs" do
+      Encoding.Json.runJsonProgram selfRoundTripProgram
+        `shouldEqual` Encoding.Json.runJsonProgram selfRoundTripProgram
+
     it "reports unsupported opcodes as structured failures" do
       let output = Encoding.Json.runJsonProgram badProgram
       case parseObject output of
@@ -151,6 +177,43 @@ hashProgram =
   }
   """
 
+selfProgram :: String
+selfProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 2,
+    "instructions": [
+      ["PROC_SELF", 0],
+      ["STATE_SET", "me", 0],
+      ["HALT", 0]
+    ]
+  }
+  """
+
+selfRoundTripProgram :: String
+selfRoundTripProgram =
+  """
+  {
+    "version": "1.0",
+    "entrypoint": "main",
+    "constants": [],
+    "functions": {
+      "main": { "arity": 0, "registerCount": 4, "instructions": [
+        ["PROC_SELF", 0],
+        ["PROC_SPAWN", 1, "child", [0]],
+        ["PROC_RECEIVE", 2],
+        ["STATE_SET", "spawned", 1],
+        ["STATE_SET", "received", 2],
+        ["RETURN", 1] ] },
+      "child": { "arity": 1, "registerCount": 2, "instructions": [
+        ["PROC_SELF", 1],
+        ["PROC_SEND", 0, 1],
+        ["RETURN", 1] ] }
+    }
+  }
+  """
+
 listLimitProgram :: String
 listLimitProgram =
   """
@@ -254,6 +317,15 @@ fieldIntString key object = Object.lookup key object >>= Json.toObject >>= Objec
 
 fieldVmString :: String -> Object.Object Json.Json -> Maybe String
 fieldVmString key object = Object.lookup key object >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+
+-- Read the pid out of a VProcessRef ({ "process": "<pid>" }) at output.result.
+resultProcess :: Object.Object Json.Json -> Maybe String
+resultProcess object = Object.lookup "result" object >>= Json.toObject >>= Object.lookup "process" >>= Json.toString
+
+-- Read the pid out of a VProcessRef stored at output.state.<key>.
+stateProcess :: String -> Object.Object Json.Json -> Maybe String
+stateProcess key object =
+  Object.lookup "state" object >>= Json.toObject >>= Object.lookup key >>= Json.toObject >>= Object.lookup "process" >>= Json.toString
 
 maybeToEither :: forall a. String -> Maybe a -> Either String a
 maybeToEither err = case _ of
