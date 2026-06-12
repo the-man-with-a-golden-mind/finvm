@@ -7,6 +7,7 @@ import Test.Spec.Runner.Node (runSpecAndExitProcess)
 import Test.Numeric.BigInt as BigInt
 import Test.Numeric.Fixed as Fixed
 import Test.Numeric.Rational as Rational
+import Test.Str as Str
 import Test.Interpreter as Interpreter
 import Test.InstructionSet as InstructionSet
 import Test.Validate as Validate
@@ -30,6 +31,7 @@ main = runSpecAndExitProcess [consoleReporter] do
   BigInt.spec
   Fixed.spec
   Rational.spec
+  Str.spec
   Interpreter.spec
   InstructionSet.spec
   Validate.spec

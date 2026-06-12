@@ -151,6 +151,17 @@ spec = do
           stateBool "deleted" object `shouldEqual` Just true
           stateIsNull "afterDelete" object `shouldEqual` true
 
+    it "exposes the str.* builtins through CALL_BUILTIN" do
+      let output = Encoding.Json.runJsonProgram strBuiltinProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          stateVmString "upper" object `shouldEqual` Just "HELLO"
+          -- str.fromInt(str.toInt("42")) round-trips, then concat with "HELLO"
+          stateVmString "joined" object `shouldEqual` Just "HELLO42"
+          fieldVmString "result" object `shouldEqual` Just "HELLO42"
+
     it "exposes SHA-256 canonical hashing as a builtin" do
       let output = Encoding.Json.runJsonProgram hashProgram
       case parseObject output of
@@ -158,6 +169,27 @@ spec = do
         Right object -> do
           fieldString "status" object `shouldEqual` Just "completed"
           fieldVmString "result" object `shouldEqual` Just "8e5cc2a18337e30e25a6669b92076e5ce93431eefa209a68ddd13f2dd29fb36b"
+
+strBuiltinProgram :: String
+strBuiltinProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 6,
+    "constants": [ { "string": "hello" }, { "string": "42" } ],
+    "instructions": [
+      ["LOAD_CONST", 0, 0],
+      ["CALL_BUILTIN", 1, "str.toUpper@1", [0]],
+      ["STATE_SET", "upper", 1],
+      ["LOAD_CONST", 2, 1],
+      ["CALL_BUILTIN", 3, "str.toInt@1", [2]],
+      ["CALL_BUILTIN", 4, "str.fromInt@1", [3]],
+      ["CALL_BUILTIN", 5, "str.concat@1", [1, 4]],
+      ["STATE_SET", "joined", 5],
+      ["RETURN", 5]
+    ]
+  }
+  """
 
 goldenProgram :: String
 goldenProgram =

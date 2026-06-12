@@ -11,6 +11,7 @@ import FinVM.Error (VMError(..), ErrorCode(..))
 import FinVM.Numeric.BigInt as BI
 import FinVM.Machine (EvalConfig, BuiltinFn)
 import FinVM.Encoding.Canonical as Canonical
+import FinVM.Builtin.Str as Str
 
 lookupBuiltin :: EvalConfig -> String -> Int -> Either VMError BuiltinFn
 lookupBuiltin config id version = 
@@ -27,7 +28,18 @@ lookupBuiltin config id version =
     "logic.and", 1 -> Right logic_and_v1
     "logic.or", 1 -> Right logic_or_v1
     "logic.not", 1 -> Right logic_not_v1
-    _, _ -> 
+    "str.length", 1 -> Right Str.str_length_v1
+    "str.concat", 1 -> Right Str.str_concat_v1
+    "str.slice", 1 -> Right Str.str_slice_v1
+    "str.indexOf", 1 -> Right Str.str_indexOf_v1
+    "str.split", 1 -> Right Str.str_split_v1
+    "str.toUpper", 1 -> Right Str.str_toUpper_v1
+    "str.toLower", 1 -> Right Str.str_toLower_v1
+    "str.trim", 1 -> Right Str.str_trim_v1
+    "str.fromInt", 1 -> Right Str.str_fromInt_v1
+    "str.toInt", 1 -> Right Str.str_toInt_v1
+    "str.replace", 1 -> Right Str.str_replace_v1
+    _, _ ->
       -- 2. Check external/dynamic builtins provided by host
       case Map.lookup id config.externalBuiltins of
         Nothing -> Left $ VMError UnknownBuiltin ("Builtin " <> id <> " v" <> show version <> " not found")

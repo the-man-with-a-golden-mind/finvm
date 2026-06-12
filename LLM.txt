@@ -157,6 +157,19 @@ Logic:
 - `logic.or@1` (a, b) -> VBool
 - `logic.not@1` (a) -> VBool
 
+Strings (pure, deterministic; UTF-16 code units; locale-independent case mapping):
+- `str.length@1` (s) -> VInt           (UTF-16 code-unit count)
+- `str.concat@1` (a, b) -> VString
+- `str.slice@1` (s, start, len) -> VString   (start/len clamped to >=0; out-of-range -> fewer/zero chars)
+- `str.indexOf@1` (s, needle) -> VInt        (first index, or -1 if absent)
+- `str.split@1` (s, sep) -> VList of VString
+- `str.toUpper@1` (s) -> VString
+- `str.toLower@1` (s) -> VString
+- `str.trim@1` (s) -> VString                (strips leading/trailing whitespace)
+- `str.fromInt@1` (n) -> VString             (BigInt -> decimal string)
+- `str.toInt@1` (s) -> VInt | VUnit          (strict decimal: optional '-', one+ digits, nothing else; normalizes "007"->7, "-0"->0; ANY invalid input -> VUnit, not an error)
+- `str.replace@1` (s, from, to) -> VString   (replace ALL occurrences)
+
 Database FFI (Encrypted, Indexed, Persistent):
 - `db.insert@1` ("tableName", recordVal) -> VString (inserted ID)
 - `db.get@1` ("tableName", idString) -> VRecord
