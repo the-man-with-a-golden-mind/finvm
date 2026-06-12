@@ -122,6 +122,35 @@ spec = do
             Just _ -> pure unit
             Nothing -> fail ("missing status in output: " <> output)
 
+    it "runs DB builtins with deterministic in-memory round trips" do
+      let output = Encoding.Json.runJsonProgram dbRoundTripProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          stateVmString "inserted" object `shouldEqual` Just "rec0"
+          stateRecordVmString "first" "name" object `shouldEqual` Just "Alice"
+          stateBool "updatedOk" object `shouldEqual` Just true
+          stateRecordVmString "updated" "name" object `shouldEqual` Just "Bob"
+          stateListFirstRecordVmString "query" "name" object `shouldEqual` Just "Bob"
+          stateIsNull "index" object `shouldEqual` true
+          stateVmString "hash" object `shouldEqual` Just "ec10407abbfb8d2bf71ca8e0838f340829daeca7c19ffbfb3a6cc4cd68aba352"
+          stateBool "deleted" object `shouldEqual` Just true
+          stateIsNull "afterDelete" object `shouldEqual` true
+          stateIsNull "missing" object `shouldEqual` true
+
+    it "runs cache builtins with unit/null on absent keys" do
+      let output = Encoding.Json.runJsonProgram cacheRoundTripProgram
+      case parseObject output of
+        Left err -> fail err
+        Right object -> do
+          fieldString "status" object `shouldEqual` Just "completed"
+          stateIsNull "before" object `shouldEqual` true
+          stateBool "set" object `shouldEqual` Just true
+          stateVmString "hit" object `shouldEqual` Just "cached"
+          stateBool "deleted" object `shouldEqual` Just true
+          stateIsNull "afterDelete" object `shouldEqual` true
+
     it "exposes SHA-256 canonical hashing as a builtin" do
       let output = Encoding.Json.runJsonProgram hashProgram
       case parseObject output of
@@ -173,6 +202,84 @@ hashProgram =
       ["LOAD_CONST", 0, 0],
       ["CALL_BUILTIN", 1, "hash.sha256@1", [0]],
       ["RETURN", 1]
+    ]
+  }
+  """
+
+dbRoundTripProgram :: String
+dbRoundTripProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 18,
+    "constants": [
+      { "string": "users" },
+      { "record": { "name": { "string": "Alice" } } },
+      { "record": { "name": { "string": "Bob" } } },
+      { "string": "missing" },
+      { "record": { "name": { "string": "Bob" } } },
+      { "record": {} },
+      { "string": "name" }
+    ],
+    "instructions": [
+      ["LOAD_CONST", 0, 0],
+      ["LOAD_CONST", 1, 1],
+      ["CALL_BUILTIN", 2, "db.insert@1", [0, 1]],
+      ["CALL_BUILTIN", 3, "db.get@1", [0, 2]],
+      ["LOAD_CONST", 4, 2],
+      ["CALL_BUILTIN", 5, "db.update@1", [0, 2, 4]],
+      ["CALL_BUILTIN", 6, "db.get@1", [0, 2]],
+      ["LOAD_CONST", 7, 4],
+      ["LOAD_CONST", 8, 5],
+      ["CALL_BUILTIN", 9, "db.query@1", [0, 7, 8]],
+      ["LOAD_CONST", 10, 6],
+      ["CALL_BUILTIN", 11, "db.createIndex@1", [0, 10]],
+      ["CALL_BUILTIN", 12, "db.hash@1", [0]],
+      ["CALL_BUILTIN", 13, "db.delete@1", [0, 2]],
+      ["CALL_BUILTIN", 14, "db.get@1", [0, 2]],
+      ["LOAD_CONST", 15, 3],
+      ["CALL_BUILTIN", 16, "db.get@1", [0, 15]],
+      ["STATE_SET", "inserted", 2],
+      ["STATE_SET", "first", 3],
+      ["STATE_SET", "updatedOk", 5],
+      ["STATE_SET", "updated", 6],
+      ["STATE_SET", "query", 9],
+      ["STATE_SET", "index", 11],
+      ["STATE_SET", "hash", 12],
+      ["STATE_SET", "deleted", 13],
+      ["STATE_SET", "afterDelete", 14],
+      ["STATE_SET", "missing", 16],
+      ["RETURN", 14]
+    ]
+  }
+  """
+
+cacheRoundTripProgram :: String
+cacheRoundTripProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 9,
+    "constants": [
+      { "string": "session" },
+      { "string": "user" },
+      { "string": "cached" }
+    ],
+    "instructions": [
+      ["LOAD_CONST", 0, 0],
+      ["LOAD_CONST", 1, 1],
+      ["LOAD_CONST", 2, 2],
+      ["CALL_BUILTIN", 3, "cache.get@1", [0, 1]],
+      ["CALL_BUILTIN", 4, "cache.set@1", [0, 1, 2]],
+      ["CALL_BUILTIN", 5, "cache.get@1", [0, 1]],
+      ["CALL_BUILTIN", 6, "cache.delete@1", [0, 1]],
+      ["CALL_BUILTIN", 7, "cache.get@1", [0, 1]],
+      ["STATE_SET", "before", 3],
+      ["STATE_SET", "set", 4],
+      ["STATE_SET", "hit", 5],
+      ["STATE_SET", "deleted", 6],
+      ["STATE_SET", "afterDelete", 7],
+      ["RETURN", 7]
     ]
   }
   """
@@ -326,6 +433,36 @@ resultProcess object = Object.lookup "result" object >>= Json.toObject >>= Objec
 stateProcess :: String -> Object.Object Json.Json -> Maybe String
 stateProcess key object =
   Object.lookup "state" object >>= Json.toObject >>= Object.lookup key >>= Json.toObject >>= Object.lookup "process" >>= Json.toString
+
+stateValue :: String -> Object.Object Json.Json -> Maybe Json.Json
+stateValue key object =
+  Object.lookup "state" object >>= Json.toObject >>= Object.lookup key
+
+stateBool :: String -> Object.Object Json.Json -> Maybe Boolean
+stateBool key object =
+  stateValue key object >>= Json.toObject >>= Object.lookup "bool" >>= Json.toBoolean
+
+stateVmString :: String -> Object.Object Json.Json -> Maybe String
+stateVmString key object =
+  stateValue key object >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+
+stateIsNull :: String -> Object.Object Json.Json -> Boolean
+stateIsNull key object = case stateValue key object of
+  Just value -> Json.isNull value
+  Nothing -> false
+
+stateRecordVmString :: String -> String -> Object.Object Json.Json -> Maybe String
+stateRecordVmString key field object =
+  stateValue key object >>= Json.toObject >>= Object.lookup "record" >>= Json.toObject >>= Object.lookup field >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+
+stateListFirstRecordVmString :: String -> String -> Object.Object Json.Json -> Maybe String
+stateListFirstRecordVmString key field object = do
+  listJson <- stateValue key object >>= Json.toObject >>= Object.lookup "list"
+  values <- Json.toArray listJson
+  first <- case values of
+    [value] -> Just value
+    _ -> Nothing
+  Json.toObject first >>= Object.lookup "record" >>= Json.toObject >>= Object.lookup field >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
 
 maybeToEither :: forall a. String -> Maybe a -> Either String a
 maybeToEither err = case _ of

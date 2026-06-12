@@ -7,7 +7,7 @@ import Data.Array as Array
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
 import FinVM.Value (ProcessId)
-import FinVM.Process (Process, ProcessStatus(..))
+import FinVM.Process (Message, Process, ProcessStatus(..), WaitCondition(..))
 
 type ScheduleEvent = { pid :: ProcessId, event :: String }
 
@@ -49,6 +49,20 @@ findProcess s pid = Map.lookup pid s.processes
 updateProcess :: Scheduler -> Process -> Scheduler
 updateProcess s p = s { processes = Map.insert p.pid p s.processes }
 
+deliverMessage :: Scheduler -> ProcessId -> Message -> Scheduler
+deliverMessage s pid msg = case findProcess s pid of
+  Nothing -> s
+  Just p ->
+    let
+      wasWaiting = p.status == ProcessWaiting WaitingForMessage
+      p' = p
+        { mailbox = Array.snoc p.mailbox msg
+        , status = if wasWaiting then ProcessReady else p.status
+        }
+      s' = updateProcess s p'
+    in
+      if wasWaiting then yieldProcess s' pid else s'
+
 nextPid :: Scheduler -> Tuple ProcessId Scheduler
 nextPid s = 
   let pid = "p" <> show s.nextPidSequence
@@ -56,4 +70,3 @@ nextPid s =
 
 yieldProcess :: Scheduler -> ProcessId -> Scheduler
 yieldProcess s pid = s { readyQueue = Array.snoc s.readyQueue pid }
-

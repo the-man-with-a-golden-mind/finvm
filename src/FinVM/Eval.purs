@@ -34,7 +34,8 @@ runMachine machineInit0 = tailRecM runSlice machineInit
           case Scheduler.nextProcess m.scheduler of
             Nothing -> 
               -- Check for deadlock
-              case wakeNextTick m of
+              if rootProcessCompleted m then Right (Done m)
+              else case wakeNextTick m of
                 Just m' -> Right (Loop m')
                 Nothing ->
                   if anyProcessWaiting m
@@ -93,6 +94,13 @@ anyProcessWaiting m =
                      ProcessWaiting _ -> true
                      _ -> false) 
             (Map.values m.scheduler.processes)
+
+rootProcessCompleted :: Machine -> Boolean
+rootProcessCompleted m = case Map.lookup "main" m.scheduler.processes of
+  Just p -> case p.status of
+    ProcessCompleted _ -> true
+    _ -> false
+  Nothing -> false
 
 wakeProcessWaiters :: String -> Machine -> Machine
 wakeProcessWaiters completedPid m =

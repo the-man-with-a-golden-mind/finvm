@@ -611,15 +611,7 @@ evalInstruction m p func inst =
             _ <- if Array.length targetP.mailbox >= m.config.limits.maxMailboxSize
               then Left $ VMError MailboxTooLarge ("Process " <> targetPid <> " mailbox is full")
               else pure unit
-            let 
-              isWaiting = targetP.status == ProcessWaiting WaitingForMessage
-              updatedTargetP = targetP 
-                { mailbox = Array.snoc targetP.mailbox vMsg 
-                , status = if isWaiting then ProcessReady else targetP.status
-                }
-              s' = Scheduler.updateProcess m.scheduler updatedTargetP
-              s'' = if isWaiting then Scheduler.yieldProcess s' targetPid else s'
-              m' = m { scheduler = s'' }
+            let m' = m { scheduler = Scheduler.deliverMessage m.scheduler targetPid vMsg }
             pure $ Tuple m' pNextPc
       _ -> Left $ VMError TypeMismatch "PROC_SEND requires a ProcessRef"
 
@@ -893,10 +885,15 @@ evalInstruction m p func inst =
         version <- case Int.fromString versionStr of
           Nothing -> Left $ VMError InvalidInstruction ("Invalid builtin version: " <> versionStr)
           Just v -> pure v
-        builtinFn <- Builtin.lookupBuiltin m.config id version
         argVals <- traverse (readReg p) args
-        res <- builtinFn argVals
-        pure $ Tuple m (writeReg pNextPc dst res)
+        case runStatefulBuiltin m id version argVals of
+          Just result -> do
+            Tuple m' res <- result
+            pure $ Tuple m' (writeReg pNextPc dst res)
+          Nothing -> do
+            builtinFn <- Builtin.lookupBuiltin m.config id version
+            res <- builtinFn argVals
+            pure $ Tuple m (writeReg pNextPc dst res)
       _ -> Left $ VMError InvalidInstruction ("Invalid builtin spec: " <> builtinSpec)
 
   ASSERT condReg errorCode -> do
@@ -963,6 +960,164 @@ writeReg :: Process -> Int -> Value -> Process
 writeReg p r v = case Array.updateAt r v p.frame.registers of
   Nothing -> p
   Just regs' -> p { frame = p.frame { registers = regs' } }
+
+runStatefulBuiltin :: Machine -> String -> Int -> Array Value -> Maybe (Either VMError (Tuple Machine Value))
+runStatefulBuiltin m id version args =
+  if version /= 1 then Nothing
+  else case id of
+    "db.insert" -> Just (dbInsert m args)
+    "db.get" -> Just (dbGet m args)
+    "db.update" -> Just (dbUpdate m args)
+    "db.delete" -> Just (dbDelete m args)
+    "db.query" -> Just (dbQuery m args)
+    "db.createIndex" -> Just (dbCreateIndex m args)
+    "db.hash" -> Just (dbHash m args)
+    "cache.set" -> Just (cacheSet m args)
+    "cache.get" -> Just (cacheGet m args)
+    "cache.delete" -> Just (cacheDelete m args)
+    _ -> Nothing
+
+dbStateKey :: String
+dbStateKey = "__finvm.db"
+
+cacheStateKey :: String
+cacheStateKey = "__finvm.cache"
+
+type DbTable =
+  { nextId :: Int
+  , rows :: Map.Map String Value
+  , indexes :: Map.Map String Value
+  }
+
+emptyDbTable :: DbTable
+emptyDbTable = { nextId: 0, rows: Map.empty, indexes: Map.empty }
+
+dbInsert :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbInsert m args = case args of
+  [VString table, record] -> do
+    tableState <- readDbTable table m
+    let id = "rec" <> show tableState.nextId
+        tableState' = tableState { nextId = tableState.nextId + 1, rows = Map.insert id record tableState.rows }
+    pure $ Tuple (writeDbTable table tableState' m) (VString id)
+  _ -> Left $ VMError TypeMismatch "db.insert/v1 expects (Table:String, Record:Value)"
+
+dbGet :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbGet m args = case args of
+  [VString table, VString id] -> do
+    tableState <- readDbTable table m
+    pure $ Tuple m (fromMaybe VUnit (Map.lookup id tableState.rows))
+  _ -> Left $ VMError TypeMismatch "db.get/v1 expects (Table:String, ID:String)"
+
+dbUpdate :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbUpdate m args = case args of
+  [VString table, VString id, record] -> do
+    tableState <- readDbTable table m
+    let existed = Map.member id tableState.rows
+        rows' = if existed then Map.insert id record tableState.rows else tableState.rows
+    pure $ Tuple (writeDbTable table (tableState { rows = rows' }) m) (VBool existed)
+  _ -> Left $ VMError TypeMismatch "db.update/v1 expects (Table:String, ID:String, Record:Value)"
+
+dbDelete :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbDelete m args = case args of
+  [VString table, VString id] -> do
+    tableState <- readDbTable table m
+    let existed = Map.member id tableState.rows
+        rows' = Map.delete id tableState.rows
+    pure $ Tuple (writeDbTable table (tableState { rows = rows' }) m) (VBool existed)
+  _ -> Left $ VMError TypeMismatch "db.delete/v1 expects (Table:String, ID:String)"
+
+dbQuery :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbQuery m args = case args of
+  [VString table, VRecord query, _options] -> do
+    tableState <- readDbTable table m
+    let rows = Map.toUnfoldable tableState.rows :: Array (Tuple String Value)
+        matched = map (\(Tuple _ row) -> row) (Array.filter (\(Tuple _ row) -> rowMatchesQuery query row) rows)
+    pure $ Tuple m (VList (Vec.fromArray matched))
+  _ -> Left $ VMError TypeMismatch "db.query/v1 expects (Table:String, Query:Record, Options:Record)"
+
+dbCreateIndex :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbCreateIndex m args = case args of
+  [VString table, VString field] -> do
+    tableState <- readDbTable table m
+    pure $ Tuple (writeDbTable table (tableState { indexes = Map.insert field (VBool true) tableState.indexes }) m) VUnit
+  _ -> Left $ VMError TypeMismatch "db.createIndex/v1 expects (Table:String, Field:String)"
+
+dbHash :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+dbHash m args = case args of
+  [VString table] -> do
+    tableState <- readDbTable table m
+    pure $ Tuple m (VString (Canonical.hashValue (VRecord tableState.rows)))
+  _ -> Left $ VMError TypeMismatch "db.hash/v1 expects (Table:String)"
+
+cacheSet :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+cacheSet m args = case args of
+  [VString ns, VString key, val] ->
+    pure $ Tuple (writeCacheNamespace ns (Map.insert key val (readCacheNamespace ns m)) m) (VBool true)
+  _ -> Left $ VMError TypeMismatch "cache.set/v1 expects (Namespace:String, Key:String, Value:Value)"
+
+cacheGet :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+cacheGet m args = case args of
+  [VString ns, VString key] ->
+    pure $ Tuple m (fromMaybe VUnit (Map.lookup key (readCacheNamespace ns m)))
+  _ -> Left $ VMError TypeMismatch "cache.get/v1 expects (Namespace:String, Key:String)"
+
+cacheDelete :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+cacheDelete m args = case args of
+  [VString ns, VString key] ->
+    let entries = readCacheNamespace ns m
+        existed = Map.member key entries
+    in pure $ Tuple (writeCacheNamespace ns (Map.delete key entries) m) (VBool existed)
+  _ -> Left $ VMError TypeMismatch "cache.delete/v1 expects (Namespace:String, Key:String)"
+
+rowMatchesQuery :: Map.Map String Value -> Value -> Boolean
+rowMatchesQuery query row = case row of
+  VRecord fields -> Array.all (\(Tuple key expected) -> Map.lookup key fields == Just expected) (Map.toUnfoldable query :: Array (Tuple String Value))
+  _ -> Map.isEmpty query
+
+readDbTable :: String -> Machine -> Either VMError DbTable
+readDbTable table m = case Map.lookup table (readRecordState dbStateKey m) of
+  Nothing -> pure emptyDbTable
+  Just (VRecord fields) -> do
+    nextId <- case Map.lookup "nextId" fields of
+      Just (VInt i) -> bigintToInt "db table nextId out of Int range" i
+      Nothing -> pure 0
+      _ -> Left $ VMError TypeMismatch "Malformed db table: nextId must be Int"
+    rows <- case Map.lookup "rows" fields of
+      Just (VRecord rows) -> pure rows
+      Nothing -> pure Map.empty
+      _ -> Left $ VMError TypeMismatch "Malformed db table: rows must be Record"
+    indexes <- case Map.lookup "indexes" fields of
+      Just (VRecord indexes) -> pure indexes
+      Nothing -> pure Map.empty
+      _ -> Left $ VMError TypeMismatch "Malformed db table: indexes must be Record"
+    pure { nextId, rows, indexes }
+  Just _ -> Left $ VMError TypeMismatch "Malformed db store: table must be Record"
+
+writeDbTable :: String -> DbTable -> Machine -> Machine
+writeDbTable table tableState m =
+  let
+    db = readRecordState dbStateKey m
+    tableValue = VRecord (Map.fromFoldable
+      [ Tuple "nextId" (VInt (BI.fromInt tableState.nextId))
+      , Tuple "rows" (VRecord tableState.rows)
+      , Tuple "indexes" (VRecord tableState.indexes)
+      ])
+  in m { state = Map.insert dbStateKey (VRecord (Map.insert table tableValue db)) m.state }
+
+readCacheNamespace :: String -> Machine -> Map.Map String Value
+readCacheNamespace ns m = case Map.lookup ns (readRecordState cacheStateKey m) of
+  Just (VRecord entries) -> entries
+  _ -> Map.empty
+
+writeCacheNamespace :: String -> Map.Map String Value -> Machine -> Machine
+writeCacheNamespace ns entries m =
+  let cache = readRecordState cacheStateKey m
+  in m { state = Map.insert cacheStateKey (VRecord (Map.insert ns (VRecord entries) cache)) m.state }
+
+readRecordState :: String -> Machine -> Map.Map String Value
+readRecordState key m = case Map.lookup key m.state of
+  Just (VRecord fields) -> fields
+  _ -> Map.empty
 
 bigintToInt :: String -> BI.BigInt -> Either VMError Int
 bigintToInt msg i = case BI.toInt i of
