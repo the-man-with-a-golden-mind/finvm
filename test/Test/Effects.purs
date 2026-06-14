@@ -5,9 +5,10 @@ import Data.Argonaut.Core as Json
 import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
 import Data.Either (Either(..))
-import Data.Maybe (Maybe(..))
+import Data.Foldable (any)
+import Data.Maybe (Maybe(..), isJust)
 import Foreign.Object as Object
-import FinVM.Encoding.Json (runEffectStep)
+import FinVM.Encoding.Json (runEffectStep, runEffectStart, runEffectResume)
 import Test.Spec (Spec, describe, it)
 import Test.Spec.Assertions (fail, shouldEqual)
 
@@ -45,10 +46,186 @@ readProgram =
   }
   """
 
+-- Async-effect program: build an http.get intent (key "k1"), EFFECT_AWAIT it
+-- (suspends), then on resume PROC_RECEIVE the EffectReply and return reply.value.
+awaitProgram :: String
+awaitProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 6,
+    "constants": [ { "string": "k1" }, { "string": "http://u" } ],
+    "instructions": [
+      ["RECORD_NEW", 0],
+      ["LOAD_CONST", 1, 0],
+      ["RECORD_SET", 0, 0, "key", 1],
+      ["LOAD_CONST", 2, 1],
+      ["RECORD_SET", 0, 0, "url", 2],
+      ["EFFECT_NEW", 3, "http.get", 0],
+      ["EFFECT_AWAIT", 3],
+      ["PROC_RECEIVE", 4],
+      ["VARIANT_PAYLOAD", 5, 4],
+      ["RECORD_GET", 4, 5, "value"],
+      ["RETURN", 4]
+    ]
+  }
+  """
+
+-- Main awaits an effect while a sibling process keeps making progress and
+-- increments state.ticks to 3.
+twoActorAwaitProgram :: String
+twoActorAwaitProgram =
+  """
+  {
+    "version": "1.0",
+    "entrypoint": "main",
+    "constants": [ { "int": "0" }, { "string": "k1" }, { "string": "http://u" }, { "int": "1" }, { "int": "3" } ],
+    "functions": {
+      "main": {
+        "registerCount": 5,
+        "instructions": [
+          ["LOAD_CONST", 0, 0],
+          ["STATE_SET", "ticks", 0],
+          ["PROC_SPAWN", 1, "ticker", []],
+          ["RECORD_NEW", 0],
+          ["LOAD_CONST", 2, 1],
+          ["RECORD_SET", 0, 0, "key", 2],
+          ["LOAD_CONST", 2, 2],
+          ["RECORD_SET", 0, 0, "url", 2],
+          ["EFFECT_NEW", 3, "http.get", 0],
+          ["EFFECT_AWAIT", 3],
+          ["PROC_RECEIVE", 4],
+          ["RETURN", 4]
+        ]
+      },
+      "ticker": {
+        "registerCount": 4,
+        "instructions": [
+          ["LABEL", "loop"],
+          ["STATE_GET", 0, "ticks"],
+          ["LOAD_CONST", 1, 3],
+          ["ADD", 0, 0, 1],
+          ["STATE_SET", "ticks", 0],
+          ["PROC_YIELD"],
+          ["LOAD_CONST", 2, 4],
+          ["LT", 3, 0, 2],
+          ["JUMP_IF", 3, "loop"],
+          ["RETURN", 0]
+        ]
+      }
+    }
+  }
+  """
+
+-- Ensures snapshot/resume preserves mailbox contents that existed before await.
+mailboxSurvivalProgram :: String
+mailboxSurvivalProgram =
+  """
+  {
+    "version": "1.0",
+    "entrypoint": "main",
+    "constants": [ { "string": "pre" }, { "string": "k1" }, { "string": "http://u" } ],
+    "functions": {
+      "main": {
+        "registerCount": 5,
+        "instructions": [
+          ["PROC_SELF", 4],
+          ["PROC_SPAWN", 3, "sender", [4]],
+          ["RECORD_NEW", 0],
+          ["LOAD_CONST", 1, 1],
+          ["RECORD_SET", 0, 0, "key", 1],
+          ["LOAD_CONST", 1, 2],
+          ["RECORD_SET", 0, 0, "url", 1],
+          ["EFFECT_NEW", 2, "http.get", 0],
+          ["EFFECT_AWAIT", 2],
+          ["PROC_RECEIVE", 3],
+          ["RETURN", 3]
+        ]
+      },
+      "sender": {
+        "arity": 1,
+        "registerCount": 2,
+        "instructions": [
+          ["LOAD_CONST", 1, 0],
+          ["PROC_SEND", 0, 1],
+          ["RETURN", 1]
+        ]
+      }
+    }
+  }
+  """
+
+-- Two processes await independently; replay remains deterministic even when
+-- deliveries are supplied in reverse order.
+outOfOrderReplayProgram :: String
+outOfOrderReplayProgram =
+  """
+  {
+    "version": "1.0",
+    "entrypoint": "main",
+    "constants": [ { "string": "k0" }, { "string": "k1" }, { "string": "u0" }, { "string": "u1" } ],
+    "functions": {
+      "main": {
+        "registerCount": 8,
+        "instructions": [
+          ["PROC_SPAWN", 0, "w0", []],
+          ["PROC_SPAWN", 1, "w1", []],
+          ["PROC_JOIN", 5, 0],
+          ["PROC_JOIN", 5, 1],
+          ["PROC_JOIN_RESULT", 2, 0],
+          ["PROC_JOIN_RESULT", 3, 1],
+          ["RECORD_NEW", 4],
+          ["RECORD_SET", 4, 4, "a", 2],
+          ["RECORD_SET", 4, 4, "b", 3],
+          ["RETURN", 4]
+        ]
+      },
+      "w0": {
+        "registerCount": 6,
+        "instructions": [
+          ["RECORD_NEW", 0],
+          ["LOAD_CONST", 1, 0],
+          ["RECORD_SET", 0, 0, "key", 1],
+          ["LOAD_CONST", 2, 2],
+          ["RECORD_SET", 0, 0, "url", 2],
+          ["EFFECT_NEW", 3, "http.get", 0],
+          ["EFFECT_AWAIT", 3],
+          ["PROC_RECEIVE", 4],
+          ["VARIANT_PAYLOAD", 5, 4],
+          ["RECORD_GET", 4, 5, "value"],
+          ["RETURN", 4]
+        ]
+      },
+      "w1": {
+        "registerCount": 6,
+        "instructions": [
+          ["RECORD_NEW", 0],
+          ["LOAD_CONST", 1, 1],
+          ["RECORD_SET", 0, 0, "key", 1],
+          ["LOAD_CONST", 2, 3],
+          ["RECORD_SET", 0, 0, "url", 2],
+          ["EFFECT_NEW", 3, "http.get", 0],
+          ["EFFECT_AWAIT", 3],
+          ["PROC_RECEIVE", 4],
+          ["VARIANT_PAYLOAD", 5, 4],
+          ["RECORD_GET", 4, 5, "value"],
+          ["RETURN", 4]
+        ]
+      }
+    }
+  }
+  """
+
 obj :: String -> Maybe (Object.Object Json.Json)
 obj s = case jsonParser s of
   Right j -> Json.toObject j
   Left _ -> Nothing
+
+pendingKey :: Json.Json -> Maybe String
+pendingKey j = Json.toObject j >>= Object.lookup "key" >>= Json.toString
+
+pendingPid :: Json.Json -> Maybe String
+pendingPid j = Json.toObject j >>= Object.lookup "pid" >>= Json.toString
 
 spec :: Spec Unit
 spec = do
@@ -81,3 +258,109 @@ spec = do
 
     it "is deterministic: same program+overrides => identical output" do
       runEffectStep emitProgram "" `shouldEqual` runEffectStep emitProgram ""
+
+    it "EFFECT_AWAIT suspends the process and reports the pending effect" do
+      let out = runEffectStart awaitProgram ""
+      case obj out of
+        Nothing -> fail ("not an object: " <> out)
+        Just o -> do
+          (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "suspended"
+          let first = Object.lookup "pending" o >>= Json.toArray >>= Array.head >>= Json.toObject
+          (first >>= Object.lookup "pid" >>= Json.toString) `shouldEqual` Just "main"
+          (first >>= Object.lookup "key" >>= Json.toString) `shouldEqual` Just "k1"
+          (first >>= Object.lookup "type_" >>= Json.toString) `shouldEqual` Just "http.get"
+          -- a resumable snapshot is present
+          isJust (Object.lookup "snapshot" o >>= Json.toObject) `shouldEqual` true
+
+    it "resume delivers the effect result as a mailbox message and completes" do
+      let out1 = runEffectStart awaitProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries = """[{ "pid": "main", "key": "k1", "result": { "string": "BODY42" } }]"""
+              out2 = runEffectResume awaitProgram snapStr deliveries
+          case obj out2 of
+            Nothing -> fail ("not an object: " <> out2)
+            Just o -> do
+              (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "completed"
+              -- the program extracted reply.value and returned it
+              let resStr = Object.lookup "result" o >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+              resStr `shouldEqual` Just "BODY42"
+
+    it "other actors keep progressing while one process is waiting on effect" do
+      let out = runEffectStart twoActorAwaitProgram ""
+      case obj out of
+        Nothing -> fail ("not an object: " <> out)
+        Just o -> do
+          (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "suspended"
+          let ticks = Object.lookup "state" o >>= Json.toObject
+                >>= Object.lookup "ticks" >>= Json.toObject
+                >>= Object.lookup "int" >>= Json.toString
+          ticks `shouldEqual` Just "3"
+
+    it "snapshot/resume preserves mailbox messages queued before await" do
+      let out1 = runEffectStart mailboxSurvivalProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries = """[{ "pid": "main", "key": "k1", "result": { "string": "BODY42" } }]"""
+              out2 = runEffectResume mailboxSurvivalProgram snapStr deliveries
+          case obj out2 of
+            Nothing -> fail ("not an object: " <> out2)
+            Just o -> do
+              (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "completed"
+              -- If mailbox survives snapshot/resume, the first message is the
+              -- pre-existing "pre" message (not the delivered EffectReply).
+              let firstMsg = Object.lookup "result" o >>= Json.toObject
+                    >>= Object.lookup "string" >>= Json.toString
+              firstMsg `shouldEqual` Just "pre"
+
+    it "out-of-order replay deliveries still produce deterministic final result" do
+      let out1 = runEffectStart outOfOrderReplayProgram ""
+      case obj out1 of
+        Nothing -> fail ("not an object: " <> out1)
+        Just o1 -> do
+          (Object.lookup "status" o1 >>= Json.toString) `shouldEqual` Just "suspended"
+          case Object.lookup "snapshot" o1 of
+            Nothing -> fail ("no snapshot in: " <> out1)
+            Just snap -> do
+              let pending = Object.lookup "pending" o1 >>= Json.toArray
+              case pending of
+                Nothing -> fail ("no pending in: " <> out1)
+                Just ps -> do
+                  (Array.length ps) `shouldEqual` 2
+                  let hasK0 = any (\j -> (Json.toObject j >>= Object.lookup "key" >>= Json.toString) == Just "k0") ps
+                  let hasK1 = any (\j -> (Json.toObject j >>= Object.lookup "key" >>= Json.toString) == Just "k1") ps
+                  hasK0 `shouldEqual` true
+                  hasK1 `shouldEqual` true
+
+                  let p0 = Array.find (\j -> pendingKey j == Just "k0") ps >>= pendingPid
+                  let p1 = Array.find (\j -> pendingKey j == Just "k1") ps >>= pendingPid
+                  case { p0, p1 } of
+                    { p0: Just pid0, p1: Just pid1 } -> do
+
+                      -- Deliberately reversed delivery order (k1 before k0).
+                      let snapStr = Json.stringify snap
+                          deliveries =
+                            "[{\"pid\":\"" <> pid1 <> "\",\"key\":\"k1\",\"result\":{\"string\":\"V1\"}}"
+                            <> ",{\"pid\":\"" <> pid0 <> "\",\"key\":\"k0\",\"result\":{\"string\":\"V0\"}}]"
+                          out2 = runEffectResume outOfOrderReplayProgram snapStr deliveries
+                      case obj out2 of
+                        Nothing -> fail ("not an object: " <> out2)
+                        Just o2 -> do
+                          (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "completed"
+                          let aVal = Object.lookup "result" o2 >>= Json.toObject
+                                >>= Object.lookup "record" >>= Json.toObject
+                                >>= Object.lookup "a" >>= Json.toObject
+                                >>= Object.lookup "option" >>= Json.toObject
+                                >>= Object.lookup "string" >>= Json.toString
+                          let bVal = Object.lookup "result" o2 >>= Json.toObject
+                                >>= Object.lookup "record" >>= Json.toObject
+                                >>= Object.lookup "b" >>= Json.toObject
+                                >>= Object.lookup "option" >>= Json.toObject
+                                >>= Object.lookup "string" >>= Json.toString
+                          aVal `shouldEqual` Just "V0"
+                          bVal `shouldEqual` Just "V1"
+                    _ -> fail ("missing pid for k0/k1 in pending: " <> out1)

@@ -3,6 +3,7 @@
 import assert from "node:assert";
 import { performance } from "node:perf_hooks";
 import { runLive, runReplay } from "../host/index.mjs";
+import { runEffectStart, runEffectResume } from "../dist/finvm-api.js";
 
 // Async-effect program: one EFFECT_AWAIT and return delivered value.
 const singleProgram = JSON.stringify({
@@ -156,6 +157,55 @@ async function main() {
     /No handler for effect type: http\.get/,
     "unknown handler rejects cleanly",
   );
+
+  // --- 6. Cross-VM actor messaging via NODE_SEND transport intent ---
+  console.log("6. cross-VM actor message delivery");
+  const senderProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 6,
+    constants: [{ string: "vmB" }, { string: "main" }, { string: "PING" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["LOAD_CONST", 3, 2],
+      ["NODE_SEND", 0, 3],
+      ["HALT", 3],
+    ],
+  });
+  const receiverProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 1,
+    constants: [],
+    instructions: [
+      ["PROC_RECEIVE", 0],
+      ["RETURN", 0],
+    ],
+  });
+
+  // VM-B starts and parks waiting for mailbox input.
+  const bStart = JSON.parse(runEffectStart(receiverProgram)(""));
+  assert.strictEqual(bStart.status, "deadlock", "receiver parks on PROC_RECEIVE before network delivery");
+
+  // Simulated network transport queues deliveries keyed by node.
+  const network = { vmB: [] };
+  const senderOut = await runLive(senderProgram, {
+    handlers: {
+      RemoteSendIntent: async (p) => {
+        network[p.node] ??= [];
+        network[p.node].push({ pid: p.pid, message: p.message });
+        return true;
+      },
+    },
+  });
+  assert.strictEqual(senderOut.value, "PING", "sender VM completed locally");
+  assert.strictEqual(senderOut.journal.length, 1, "sender journals transport intent");
+  assert.strictEqual(senderOut.journal[0].type_, "RemoteSendIntent");
+
+  const deliveriesJson = JSON.stringify(network.vmB);
+  const bResume = JSON.parse(runEffectResume(receiverProgram)(JSON.stringify(bStart.snapshot))(deliveriesJson));
+  assert.strictEqual(bResume.status, "completed", "receiver resumes and consumes delivered message");
+  assert.deepStrictEqual(bResume.result, { string: "PING" }, "receiver gets remote actor message");
 
   console.log("All effect driver tests passed. 🚀");
 }

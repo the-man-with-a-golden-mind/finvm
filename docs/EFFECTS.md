@@ -44,42 +44,45 @@ it never crashes the VM, and the VM itself raises clean `VMError`s for malformed
 intents (e.g. a payload without a string `key`).
 
 ## 3. The driver loop (`host/driver.mjs`)
-`runEffectStep` (PureScript, pure) runs the program once with injected
-`input`/`state` and returns `{ status, result, state, events, outbox }`. The driver:
+The host now uses the snapshot/resume API, not whole-program re-run:
 
-1. Run the program (pure) with the accumulated `input` and `state`.
-2. Take `outbox` intents in **request order**; keep only those whose `key` is not
-   already in `input` (**dedup by key** → no double-writes on re-entry).
-3. Perform the pending intents (live: handlers; replay: journal) and write each
-   result into `input[key]`; carry `state` forward.
-4. Repeat until a run yields no new effects, then return the final value/events.
+1. `runEffectStart(program, overrides)` runs the VM to quiescence and returns:
+   - `status`: `suspended` | `completed` | `deadlock`
+   - `snapshot`: resumable execution state
+   - `pending`: ordered effect requests as `{ pid, key, type_, payload }`
+   - plus `events`, `result`, `state`
+2. If `status == "suspended"`, the driver performs `pending` effects.
+3. Build `deliveries` in request order as `{ pid, key, result }`.
+4. `runEffectResume(program, snapshot, deliveries)` continues from the exact
+   machine state and runs again to quiescence.
+5. Repeat until `status == "completed"` (or classify deadlock/error).
 
-**Re-entrancy.** Because `LOAD_INPUT` errors on a missing key, a program must not
-read a result it hasn't requested yet. The convention: on the first run a program
-requests its effect, records a flag in `state` (e.g. `STATE_SET "requested"`), and
-returns; the driver carries `state` forward, so on the next run the program takes
-the "result is ready" branch and `LOAD_INPUT`s it. The driver's dedup-by-key makes
-re-emitted intents harmless.
+This model suspends only the waiting process (`EFFECT_AWAIT`) while other actors
+can continue running and mutating state before quiescence.
 
-## 4. Concurrency
-When a single run emits multiple intents (a batch), the driver performs them
-**concurrently** (`Promise.all`) but writes the results back **in request order**,
-and journals them in request order — so replay is deterministic regardless of which
-effect's I/O finished first.
+## 4. Concurrency + determinism
+When a single quiescent step exposes multiple `pending` effects, the driver may
+perform them **concurrently** (`Promise.all`), but it must:
+
+- preserve **request-order deliveries** when calling `runEffectResume`
+- preserve **request-order journal entries**
+
+Handlers may finish out-of-order; replay remains deterministic because resume and
+journal ordering are stable.
 
 ## 5. Journal (record / replay)
 The journal is a serializable array, in request order:
 ```json
-[ { "type_": "http.get",
+[ { "pid": "p0",
+    "type_": "http.get",
     "key": "px",
     "payload": { "record": { "key": {"string":"px"}, "url": {"string":"https://…"} } },
     "result": { "string": "{\"symbol\":\"BTCUSDT\",\"price\":\"…\"}" } } ]
 ```
-- **record (live):** `runLive` performs the real effect, appends `{type_,key,payload,result}`.
-- **replay:** `runReplay` returns the next journaled result *without performing the
-  effect* (synchronous, zero I/O); it never re-runs writes. A mismatch between the
-  program's requested intents and the journal (wrong key/type or exhausted) is a
-  hard error. Same journal ⇒ identical `value`, `events`, and `state`.
+- **record (live):** `runLive` appends `{pid,key,type_,payload,result}`.
+- **replay:** `runReplay` consumes the next journal entry *without performing I/O*.
+  Mismatch on `pid`/`key`/`type_` (or exhausted journal) is a hard error.
+  Same program + same journal => identical `value`, `events`, and `state`.
 
 A crashed bot persists its journal, `runReplay`s it to restore state, then switches
 to `runLive` to go live again. If you ever add time/randomness, journal it too
@@ -115,8 +118,9 @@ await runLive(programSource, { handlers: reg.handlers });
 ## 7. Bundles
 `npm run build` emits:
 - `dist/finvm-core.js` — the CLI core (node).
-- `dist/finvm-api.js` — the API the driver imports (`runEffectStep`,
-  `runJsonProgramResult`), node, `big-integer` external.
+- `dist/finvm-api.js` — the API the driver imports (`runEffectStart`,
+  `runEffectResume`, `runEffectStep`, `runJsonProgramResult`), node,
+  `big-integer` external.
 - `dist/finvm-api.browser.js` — same API for the browser with **`big-integer`
   inlined**. **No `node:crypto`**: SHA-256 (`hash.sha256`, `db.hash`) is a pure-JS
   implementation and AES-GCM/PBKDF2 use `globalThis.crypto` (Web Crypto, present in
@@ -128,6 +132,5 @@ await runLive(programSource, { handlers: reg.handlers });
 ## 8. Determinism guarantee
 Per-instruction execution is the pure VM. The only effectful part is the driver,
 and every effect result flows through the journal. **`runReplay` reproduces
-`value` + `events` + `state` with zero I/O** — verified by `test/driver_test.js`
-and, against a real endpoint, by `host/verify-binance.mjs` (live Binance fetch,
-then replay with no network yields the identical body).
+`value` + `events` + `state` with zero I/O** — including multi-actor await
+scenarios where handlers complete out-of-order.

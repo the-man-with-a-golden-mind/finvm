@@ -3,6 +3,8 @@ module FinVM.Encoding.Json
   , runJsonProgram
   , runJsonProgramResult
   , runEffectStep
+  , runEffectStart
+  , runEffectResume
   , errorJson
   , valueToJson
   , decodeValue
@@ -15,6 +17,7 @@ import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
 import Data.BigInt as BigInt
 import Data.Either (Either(..))
+import Data.Foldable (any) as Foldable
 import Data.Int as Int
 import Data.List as List
 import Data.Map (Map)
@@ -31,8 +34,9 @@ import FinVM.Instruction as I
 import FinVM.Limits (EvalLimits)
 import FinVM.Machine (Machine)
 import FinVM.Numeric.Rounding (Rounding(..))
-import FinVM.Process (Process, ProcessStatus(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..))
 import FinVM.Process.Scheduler as Scheduler
+import FinVM.Encoding.Resume (encodeMachineState, decodeMachineState)
 import FinVM.Program (Program)
 import FinVM.Validate as Validate
 import FinVM.Registers (emptyRegisters)
@@ -219,6 +223,169 @@ decodeOverrides s =
     stateOv <- optionalObjectMap "state" obj decodeValue
     pure { inputOv, stateOv }
 
+-- ===========================================================================
+-- ASYNC EFFECT MODEL: suspend/resume (per-process), not whole-program re-run.
+-- runEffectStart runs to quiescence; runEffectResume delivers effect results as
+-- mailbox messages and continues from a snapshot. See docs/EFFECTS.md.
+-- ===========================================================================
+
+effectFail :: String -> String -> String
+effectFail status msg = Json.stringify $ objectJson
+  [ Tuple "status" (Json.fromString status), Tuple "error" (Json.fromString msg) ]
+
+-- | Start a fresh async-effect run: build the machine, run to quiescence, classify.
+runEffectStart :: String -> String -> String
+runEffectStart programSource overridesSource =
+  case decodeProgramFile programSource of
+    Left err -> effectFail "error" err
+    Right file -> case decodeOverrides overridesSource of
+      Left err -> effectFail "error" err
+      Right ov ->
+        let
+          base = initialMachine file
+          m0 = base { input = Map.union ov.inputOv base.input, state = Map.union ov.stateOv base.state }
+        in case Eval.runUntilQuiescent m0 of
+          Left vmErr -> effectFail "failed" (renderVMError vmErr)
+          Right m -> quiescedOutput m
+
+-- | Resume from a snapshot, delivering effect results to processes' mailboxes,
+-- | then run to quiescence again.
+runEffectResume :: String -> String -> String -> String
+runEffectResume programSource snapshotSource deliveriesSource =
+  case decodeProgramFile programSource of
+    Left err -> effectFail "error" err
+    Right file -> case jsonParser snapshotSource of
+      Left perr -> effectFail "error" ("snapshot parse: " <> perr)
+      Right snapJson -> case decodeMachineState (initialMachine file) snapJson of
+        Left derr -> effectFail "error" ("snapshot decode: " <> derr)
+        Right m1 -> case decodeDeliveries deliveriesSource of
+          Left err -> effectFail "error" err
+          Right ds ->
+            let m2 = Array.foldl applyDelivery m1 ds
+            in case Eval.runUntilQuiescent m2 of
+              Left vmErr -> effectFail "failed" (renderVMError vmErr)
+              Right m -> quiescedOutput m
+
+-- | Serialize a quiescent machine: status + resumable snapshot + pending effects
+-- | (request order) + events + result + state.
+quiescedOutput :: Machine -> String
+quiescedOutput m =
+  let
+    pending = orderedList m.outbox
+    anyAlive = Foldable.any (not <<< isTerminal <<< _.status) (Map.values m.scheduler.processes)
+    status =
+      if not (Array.null pending) then "suspended"
+      else if anyAlive then "deadlock"
+      else "completed"
+  in Json.stringify $ objectJson
+    [ Tuple "status" (Json.fromString status)
+    , Tuple "snapshot" (encodeMachineState m)
+    , Tuple "pending" (Json.fromArray (pendingEntry <$> pending))
+    , Tuple "events" (Json.fromArray (taggedPayloadToJson <$> orderedList m.events))
+    , Tuple "result" (valueToJson (mainResult m))
+    , Tuple "state" (stringMapToJson m.state)
+    ]
+  where
+    isTerminal s = case s of
+      ProcessCompleted _ -> true
+      ProcessFailed _ -> true
+      ProcessCancelled _ -> true
+      ProcessExited _ -> true
+      _ -> false
+
+-- An outbox effect intent is tagged { pid, key, payload } by EFFECT_AWAIT.
+pendingEntry :: { type_ :: String, payload :: Value } -> Json.Json
+pendingEntry e =
+  let
+    fields = case e.payload of
+      VRecord f -> f
+      _ -> Map.empty
+    getStr k = case Map.lookup k fields of
+      Just (VString s) -> s
+      _ -> ""
+    getVal k = case Map.lookup k fields of
+      Just v -> v
+      _ -> VUnit
+    isAwaitTagged =
+      case Map.lookup "key" fields, Map.lookup "payload" fields of
+        Just (VString _), Just _ -> true
+        _, _ -> false
+    pidVal =
+      if isAwaitTagged then getStr "pid"
+      else case Map.lookup "pid" fields of
+        Just (VString s) -> s
+        _ -> ""
+    keyVal =
+      if isAwaitTagged then getStr "key" else ""
+    payloadVal =
+      if isAwaitTagged then getVal "payload" else e.payload
+  in objectJson
+    [ Tuple "pid" (Json.fromString pidVal)
+    , Tuple "key" (Json.fromString keyVal)
+    , Tuple "type_" (Json.fromString e.type_)
+    , Tuple "payload" (valueToJson payloadVal)
+    ]
+
+decodeDeliveries :: String -> Either String (Array { pid :: String, key :: Maybe String, result :: Maybe Value, message :: Maybe Value })
+decodeDeliveries s =
+  if s == "" then Right []
+  else do
+    root <- jsonParser s
+    arr <- asArray "deliveries" root
+    traverse decodeDelivery arr
+
+decodeDelivery :: Json.Json -> Either String { pid :: String, key :: Maybe String, result :: Maybe Value, message :: Maybe Value }
+decodeDelivery j = do
+  o <- asObject "delivery" j
+  pid <- requiredString "pid" o
+  result <- case Object.lookup "result" o of
+    Just r -> Just <$> decodeValue r
+    Nothing -> Right Nothing
+  message <- case Object.lookup "message" o of
+    Just r -> Just <$> decodeValue r
+    Nothing -> Right Nothing
+  key <- case Object.lookup "key" o of
+    Just k -> Just <$> asString "key" k
+    Nothing -> Right Nothing
+  pure { pid, key, result, message }
+
+-- Deliver an effect result to a process: append an EffectReply message to its
+-- mailbox and wake it if it was parked on this effect's key.
+applyDelivery :: Machine -> { pid :: String, key :: Maybe String, result :: Maybe Value, message :: Maybe Value } -> Machine
+applyDelivery m d = case Scheduler.findProcess m.scheduler d.pid of
+  Nothing -> m
+  Just p -> case d.message, d.key of
+    -- Generic mailbox delivery (used by cross-VM actor messaging).
+    Just msg, _ ->
+      let
+        wokenFor = case p.status of
+          ProcessWaiting WaitingForMessage -> true
+          _ -> false
+        p' = p
+          { mailbox = Array.snoc p.mailbox msg
+          , status = if wokenFor then ProcessReady else p.status
+          }
+        s1 = Scheduler.updateProcess m.scheduler p'
+        s2 = if wokenFor then Scheduler.yieldProcess s1 d.pid else s1
+      in m { scheduler = s2 }
+    -- Effect reply delivery (existing EFFECT_AWAIT path).
+    _, Just key ->
+      let
+        value = fromMaybe VUnit d.result
+        reply = VVariant "EffectReply" (VRecord (Map.fromFoldable [ Tuple "key" (VString key), Tuple "value" value ]))
+        wokenFor = case p.status of
+          ProcessWaiting (WaitingOnEffect k) -> k == key
+          _ -> false
+        p' = p
+          { mailbox = Array.snoc p.mailbox reply
+          , status = if wokenFor then ProcessReady else p.status
+          }
+        s1 = Scheduler.updateProcess m.scheduler p'
+        s2 = if wokenFor then Scheduler.yieldProcess s1 d.pid else s1
+      in m { scheduler = s2 }
+    -- Nothing to apply.
+    _, _ -> m
+
 mkMainFunction :: Int -> Array Instruction -> VMFunction.Function
 mkMainFunction registerCount instructions =
   { id: "main"
@@ -378,6 +545,7 @@ decodeInstruction json = do
     "EVENT_BATCH_APPEND" -> I.EVENT_BATCH_APPEND <$> intAt 1 parts <*> intAt 2 parts <*> intAt 3 parts
     "EFFECT_NEW" -> I.EFFECT_NEW <$> intAt 1 parts <*> stringAt 2 parts <*> intAt 3 parts
     "EFFECT_REQUEST" -> I.EFFECT_REQUEST <$> intAt 1 parts
+    "EFFECT_AWAIT" -> I.EFFECT_AWAIT <$> intAt 1 parts
     "EFFECT_BATCH_NEW" -> I.EFFECT_BATCH_NEW <$> intAt 1 parts
     "EFFECT_BATCH_APPEND" -> I.EFFECT_BATCH_APPEND <$> intAt 1 parts <*> intAt 2 parts <*> intAt 3 parts
     "PROC_SELF" -> I.PROC_SELF <$> intAt 1 parts

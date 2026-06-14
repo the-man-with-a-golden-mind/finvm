@@ -65,7 +65,7 @@ function normalizePending(entry) {
         : "main";
   }
   if (typeof normalized.key !== "string" || normalized.key.length === 0) {
-    throw new Error("invalid pending entry: missing key");
+    normalized.key = null;
   }
   if (typeof normalized.type_ !== "string" || normalized.type_.length === 0) {
     throw new Error("invalid pending entry: missing type_");
@@ -150,7 +150,9 @@ export async function runLive(programSource, { handlers = {}, input = {}, state 
     for (let k = 0; k < pending.length; k++) {
       const p = pending[k];
       const rv = jsToValue(results[k]);
-      deliveries.push({ pid: p.pid, key: p.key, result: rv });
+      if (typeof p.key === "string" && p.key.length > 0) {
+        deliveries.push({ pid: p.pid, key: p.key, result: rv });
+      }
       jrnl.push({ pid: p.pid, key: p.key, type_: p.type_, payload: p.payload, result: rv });
     }
 
@@ -189,13 +191,17 @@ export function runReplay(programSource, journal, { input = {}, state = {} } = {
     for (const p of pending) {
       const entry = journal[qi++];
       if (!entry) throw new Error(`journal exhausted: no recorded result for effect '${p.type_}' key '${p.key}'`);
-      if (entry.pid !== p.pid || entry.key !== p.key || entry.type_ !== p.type_) {
+      const expectedKey = p.key ?? null;
+      const actualKey = entry.key ?? null;
+      if (entry.pid !== p.pid || actualKey !== expectedKey || entry.type_ !== p.type_) {
         throw new Error(
           `journal mismatch at ${qi - 1}: expected ${p.pid}/${p.type_}/${p.key}, ` +
           `journal has ${entry.pid}/${entry.type_}/${entry.key}`
         );
       }
-      deliveries.push({ pid: p.pid, key: p.key, result: entry.result }); // already tagless Value
+      if (typeof p.key === "string" && p.key.length > 0) {
+        deliveries.push({ pid: p.pid, key: p.key, result: entry.result }); // already tagless Value
+      }
     }
 
     const snapshotJson = JSON.stringify(out.snapshot);
