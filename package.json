@@ -1,9 +1,9 @@
 {
-  "name": "finvm",
-  "version": "1.0.0",
+  "name": "@v_m_v/finvm",
+  "version": "1.0.1",
   "type": "module",
   "bin": {
-    "finvm": "./bin/finvm.js"
+    "finvm": "bin/finvm.js"
   },
   "main": "dist/finvm-core.js",
   "files": [
@@ -22,6 +22,7 @@
     "fuzz": "node test/fuzz.js",
     "stress": "node bench/stress.js",
     "bench": "node bench/vm_vs_js_benchmark.js",
+    "prepublishOnly": "npm run build",
     "build": "spago build && npm run bundle",
     "bundle": "npm run bundle:core && npm run bundle:api && npm run bundle:browser",
     "bundle:core": "esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer",

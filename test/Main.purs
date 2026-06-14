@@ -24,6 +24,7 @@ import Test.E2E as E2E
 import Test.Replay as Replay
 import Test.Conformance as Conformance
 import Test.Effects as Effects
+import Test.Snapshot as Snapshot
 import Test.Properties as Properties
 import Test.PerformanceMode as PerformanceMode
 
@@ -49,5 +50,6 @@ main = runSpecAndExitProcess [consoleReporter] do
   Replay.spec
   Conformance.spec
   Effects.spec
+  Snapshot.spec
   PerformanceMode.spec
   Properties.spec

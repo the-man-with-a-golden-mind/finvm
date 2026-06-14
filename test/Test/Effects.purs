@@ -286,6 +286,7 @@ spec = do
         Just o -> do
           (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "suspended"
           let first = Object.lookup "pending" o >>= Json.toArray >>= Array.head >>= Json.toObject
+          (first >>= Object.lookup "kind" >>= Json.toString) `shouldEqual` Just "await_reply"
           (first >>= Object.lookup "pid" >>= Json.toString) `shouldEqual` Just "main"
           (first >>= Object.lookup "key" >>= Json.toString) `shouldEqual` Just "k1"
           (first >>= Object.lookup "type_" >>= Json.toString) `shouldEqual` Just "http.get"
@@ -392,6 +393,7 @@ spec = do
         Just o1 -> do
           (Object.lookup "status" o1 >>= Json.toString) `shouldEqual` Just "suspended"
           let firstPending = Object.lookup "pending" o1 >>= Json.toArray >>= Array.head >>= Json.toObject
+          (firstPending >>= Object.lookup "kind" >>= Json.toString) `shouldEqual` Just "transport"
           (firstPending >>= Object.lookup "type_" >>= Json.toString) `shouldEqual` Just "RemoteMonitorIntent"
           case Object.lookup "snapshot" o1 of
             Nothing -> fail ("no snapshot in: " <> out1)

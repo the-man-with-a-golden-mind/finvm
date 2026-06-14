@@ -58,13 +58,25 @@ function normalizePending(entry) {
   }
   const payloadJs = valueToJs(entry.payload);
   const normalized = { ...entry };
+  if (typeof normalized.kind !== "string" || normalized.kind.length === 0) {
+    normalized.kind =
+      typeof normalized.key === "string" && normalized.key.length > 0
+        ? "await_reply"
+        : "transport";
+  }
+  if (normalized.kind !== "await_reply" && normalized.kind !== "transport") {
+    throw new Error(`invalid pending entry: unknown kind '${normalized.kind}'`);
+  }
   if (typeof normalized.pid !== "string" || normalized.pid.length === 0) {
     normalized.pid =
       payloadJs && typeof payloadJs === "object" && typeof payloadJs.pid === "string"
         ? payloadJs.pid
         : "main";
   }
-  if (typeof normalized.key !== "string" || normalized.key.length === 0) {
+  if (normalized.kind === "await_reply" && (typeof normalized.key !== "string" || normalized.key.length === 0)) {
+    throw new Error("invalid pending entry: await_reply requires key");
+  }
+  if (normalized.kind === "transport" && (typeof normalized.key !== "string" || normalized.key.length === 0)) {
     normalized.key = null;
   }
   if (typeof normalized.type_ !== "string" || normalized.type_.length === 0) {
@@ -150,10 +162,10 @@ export async function runLive(programSource, { handlers = {}, input = {}, state 
     for (let k = 0; k < pending.length; k++) {
       const p = pending[k];
       const rv = jsToValue(results[k]);
-      if (typeof p.key === "string" && p.key.length > 0) {
+      if (p.kind === "await_reply") {
         deliveries.push({ pid: p.pid, key: p.key, result: rv });
       }
-      jrnl.push({ pid: p.pid, key: p.key, type_: p.type_, payload: p.payload, result: rv });
+      jrnl.push({ kind: p.kind, pid: p.pid, key: p.key, type_: p.type_, payload: p.payload, result: rv });
     }
 
     const snapshotJson = JSON.stringify(out.snapshot);
@@ -191,15 +203,17 @@ export function runReplay(programSource, journal, { input = {}, state = {} } = {
     for (const p of pending) {
       const entry = journal[qi++];
       if (!entry) throw new Error(`journal exhausted: no recorded result for effect '${p.type_}' key '${p.key}'`);
-      const expectedKey = p.key ?? null;
+      const expectedKey = p.kind === "await_reply" ? p.key : null;
       const actualKey = entry.key ?? null;
-      if (entry.pid !== p.pid || actualKey !== expectedKey || entry.type_ !== p.type_) {
+      const expectedKind = p.kind;
+      const actualKind = entry.kind ?? (actualKey !== null ? "await_reply" : "transport");
+      if (entry.pid !== p.pid || actualKey !== expectedKey || entry.type_ !== p.type_ || actualKind !== expectedKind) {
         throw new Error(
-          `journal mismatch at ${qi - 1}: expected ${p.pid}/${p.type_}/${p.key}, ` +
-          `journal has ${entry.pid}/${entry.type_}/${entry.key}`
+          `journal mismatch at ${qi - 1}: expected ${p.kind}/${p.pid}/${p.type_}/${p.key}, ` +
+          `journal has ${actualKind}/${entry.pid}/${entry.type_}/${entry.key}`
         );
       }
-      if (typeof p.key === "string" && p.key.length > 0) {
+      if (p.kind === "await_reply") {
         deliveries.push({ pid: p.pid, key: p.key, result: entry.result }); // already tagless Value
       }
     }

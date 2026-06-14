@@ -181,6 +181,7 @@ extractRegisters = case _ of
   EVENT_BATCH_APPEND r1 r2 r3 -> [r1, r2, r3]
   EFFECT_NEW r1 _ r2 -> [r1, r2]
   EFFECT_REQUEST r -> [r]
+  EFFECT_AWAIT r -> [r]
   EFFECT_BATCH_NEW r -> [r]
   EFFECT_BATCH_APPEND r1 r2 r3 -> [r1, r2, r3]
   PROC_SELF r -> [r]

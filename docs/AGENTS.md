@@ -73,5 +73,6 @@ npm run bench       # FinVM vs native JS, and VM-DB vs native data structures
 - [EFFECTS.md](EFFECTS.md) — host effect driver, intent contract, journal (record/replay)
 - [DATABASE.md](DATABASE.md) — DB/cache FFI
 - [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) — known gaps & history
+- [AI_NEXT_STEPS.md](AI_NEXT_STEPS.md) — execution roadmap for AI agents continuing distributed actor work
 - `../LLM.txt` — compact compiler-target reference
 </content>

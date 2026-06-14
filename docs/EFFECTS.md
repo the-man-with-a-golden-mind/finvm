@@ -49,10 +49,15 @@ The host now uses the snapshot/resume API, not whole-program re-run:
 1. `runEffectStart(program, overrides)` runs the VM to quiescence and returns:
    - `status`: `suspended` | `completed` | `deadlock`
    - `snapshot`: resumable execution state
-   - `pending`: ordered effect requests as `{ pid, key, type_, payload }`
+   - `pending`: ordered items with explicit kind:
+     - await-reply: `{ kind: "await_reply", pid, key, type_, payload }`
+     - transport: `{ kind: "transport", pid, type_, payload }`
    - plus `events`, `result`, `state`
 2. If `status == "suspended"`, the driver performs `pending` effects.
-3. Build `deliveries` in request order as `{ pid, key, result }`.
+3. Build `deliveries` in request order using explicit envelopes:
+   - effect reply: `{ pid, key, result }`
+   - mailbox message: `{ pid, message }`
+   - disconnect signal: `{ disconnect: { node, reason? } }`
 4. `runEffectResume(program, snapshot, deliveries)` continues from the exact
    machine state and runs again to quiescence.
 5. Repeat until `status == "completed"` (or classify deadlock/error).

@@ -102,6 +102,7 @@ data Instruction
   | EVENT_BATCH_APPEND Register Register Register
   | EFFECT_NEW Register String Register
   | EFFECT_REQUEST Register
+  | EFFECT_AWAIT Register
   | EFFECT_BATCH_NEW Register
   | EFFECT_BATCH_APPEND Register Register Register
 
