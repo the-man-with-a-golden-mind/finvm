@@ -1,22 +1,24 @@
 // FinVM host effect driver.
 //
-// The VM core is pure: a run emits effect *intents* into its outbox and reads
-// effect *results* from `input`. This driver performs the intents with real I/O,
-// feeds results back, and records (intent,result) pairs to a JOURNAL so a run can
-// be replayed deterministically with zero I/O.
+// Snapshot/resume model:
+//  - runEffectStart(program, overrides) runs to quiescence and returns:
+//      { status, snapshot, pending, events, result, state }
+//  - when status === "suspended", perform all pending effects, then
+//    runEffectResume(program, snapshot, deliveries) to continue from that
+//    exact machine state (no whole-program re-run).
+//
+// This file performs real I/O for live runs and records a JOURNAL so the same
+// execution can be replayed with zero I/O.
 //
 // CONTRACT (see docs/EFFECTS.md):
-//  - An intent is { type_, payload }. `payload` is a VRecord that MUST contain a
-//    string `key` field (the correlation key = the `input` path where the program
-//    reads the result via LOAD_INPUT/LOAD_CONTEXT). Remaining fields are args.
-//  - The driver dedups by `key` (an intent whose key is already fulfilled is not
-//    re-performed) and carries `state` forward between iterations, so the program
-//    is re-entrant across the request/resume loop.
-//
-// Determinism: per-instruction execution stays in the pure VM (runEffectStep).
-// Only this driver is effectful. Replay reproduces value+events+state with no I/O.
+//  - pending entries are in request order:
+//      { pid, key, type_, payload }
+//  - live runs may perform handlers concurrently (Promise.all), but deliveries
+//    MUST be sent in pending order for deterministic replay.
+//  - replay uses the recorded journal entries (pid,key,type_,payload,result)
+//    rather than performing effects.
 
-import { runEffectStep } from "../dist/finvm-api.js";
+import { runEffectStart, runEffectResume } from "../dist/finvm-api.js";
 
 const MAX_ITERS = 10000; // safety bound on request/resume rounds
 
@@ -50,85 +52,156 @@ export function jsToValue(x) {
   return { string: String(x) };
 }
 
-function correlationKey(intent, payloadJs) {
-  if (payloadJs === null || typeof payloadJs !== "object" || typeof payloadJs.key !== "string") {
-    throw new Error(`effect intent '${intent.type_}' payload must be a record with a string 'key' field`);
+function normalizePending(entry) {
+  if (!entry || typeof entry !== "object") {
+    throw new Error("invalid pending entry: expected object");
   }
-  return payloadJs.key;
+  const payloadJs = valueToJs(entry.payload);
+  const normalized = { ...entry };
+  if (typeof normalized.pid !== "string" || normalized.pid.length === 0) {
+    normalized.pid =
+      payloadJs && typeof payloadJs === "object" && typeof payloadJs.pid === "string"
+        ? payloadJs.pid
+        : "main";
+  }
+  if (typeof normalized.key !== "string" || normalized.key.length === 0) {
+    throw new Error("invalid pending entry: missing key");
+  }
+  if (typeof normalized.type_ !== "string" || normalized.type_.length === 0) {
+    throw new Error("invalid pending entry: missing type_");
+  }
+  return normalized;
 }
 
-function step(programSource, inputAccum, stateAccum) {
-  // runEffectStep is a curried PureScript function: call f(a)(b).
-  const out = JSON.parse(runEffectStep(programSource)(JSON.stringify({ input: inputAccum, state: stateAccum })));
-  if (out.status !== "completed") {
+function parseVmOutput(raw) {
+  let out;
+  try {
+    out = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`invalid VM JSON output: ${String(err)}`);
+  }
+  if (!out || typeof out !== "object" || typeof out.status !== "string") {
+    throw new Error("invalid VM output shape");
+  }
+  if (out.status === "error" || out.status === "failed") {
     const e = new Error(`VM ${out.status}: ${out.error ?? "unknown"}`);
     e.vmStatus = out.status;
     throw e;
   }
-  // attach decoded payloads + dedup against already-fulfilled keys
-  out._intents = out.outbox.map((i) => ({ type_: i.type_, payload: i.payload, payloadJs: valueToJs(i.payload) }));
   return out;
 }
 
+function start(programSource, inputAccum, stateAccum) {
+  // runEffectStart is curried: runEffectStart(program)(overridesJson)
+  const raw = runEffectStart(programSource)(JSON.stringify({ input: inputAccum, state: stateAccum }));
+  return parseVmOutput(raw);
+}
+
+function resume(programSource, snapshotJson, deliveries) {
+  // runEffectResume is curried: runEffectResume(program)(snapshot)(deliveriesJson)
+  const raw = runEffectResume(programSource)(snapshotJson)(JSON.stringify(deliveries));
+  return parseVmOutput(raw);
+}
+
 function eventsToJs(out) {
-  return out.events.map((e) => ({ type_: e.type_, payload: valueToJs(e.payload) }));
+  const events = Array.isArray(out.events) ? out.events : [];
+  return events.map((e) => ({ type_: e.type_, payload: valueToJs(e.payload) }));
 }
 
 // ---- LIVE run: perform real effects, record a journal -------------------
 // handlers: { [type_]: async (payloadJs) => result }
 // returns { value, events, journal, state }
 export async function runLive(programSource, { handlers = {}, input = {}, state = {}, journal = [] } = {}) {
-  const inputAccum = { ...input };
-  let stateAccum = { ...state };
+  const inputAccum = { ...input }; // initial seed for runEffectStart only
+  const stateAccum = { ...state }; // initial seed for runEffectStart only
   const jrnl = [...journal];
-  let last;
+  let out = start(programSource, inputAccum, stateAccum);
+
   for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const out = step(programSource, inputAccum, stateAccum);
-    last = out;
-    stateAccum = out.state;
-    const pending = out._intents.filter((i) => !(correlationKey(i, i.payloadJs) in inputAccum));
-    if (pending.length === 0) break;
-    // Perform concurrently; write results back IN REQUEST ORDER for deterministic replay.
-    const results = await Promise.all(pending.map((i) => {
-      const h = handlers[i.type_];
-      if (!h) return Promise.reject(new Error(`No handler for effect type: ${i.type_}`));
-      return Promise.resolve(h(i.payloadJs));
-    }));
-    for (let k = 0; k < pending.length; k++) {
-      const i = pending[k];
-      const key = correlationKey(i, i.payloadJs);
-      const rv = jsToValue(results[k]);
-      inputAccum[key] = rv;
-      jrnl.push({ type_: i.type_, key, payload: i.payload, result: rv });
+    if (out.status === "completed") {
+      return { value: valueToJs(out.result), events: eventsToJs(out), journal: jrnl, state: out.state };
     }
+    if (out.status !== "suspended") {
+      throw new Error(`VM ${out.status}: expected suspended/completed`);
+    }
+
+    const pendingRaw = Array.isArray(out.pending) ? out.pending : [];
+    const pending = pendingRaw.map(normalizePending);
+    if (pending.length === 0) {
+      throw new Error("VM returned status 'suspended' with no pending effects");
+    }
+
+    // Perform concurrently; build deliveries IN REQUEST ORDER.
+    const results = await Promise.all(
+      pending.map((p) => {
+        const h = handlers[p.type_];
+        if (!h) return Promise.reject(new Error(`No handler for effect type: ${p.type_}`));
+        const payloadJs = valueToJs(p.payload);
+        // Keep key available to handlers for backward compatibility.
+        const payloadWithKey =
+          payloadJs && typeof payloadJs === "object" && !Array.isArray(payloadJs)
+            ? { key: p.key, ...payloadJs }
+            : payloadJs;
+        return Promise.resolve(h(payloadWithKey, { pid: p.pid, key: p.key, type_: p.type_ }));
+      })
+    );
+
+    const deliveries = [];
+    for (let k = 0; k < pending.length; k++) {
+      const p = pending[k];
+      const rv = jsToValue(results[k]);
+      deliveries.push({ pid: p.pid, key: p.key, result: rv });
+      jrnl.push({ pid: p.pid, key: p.key, type_: p.type_, payload: p.payload, result: rv });
+    }
+
+    const snapshotJson = JSON.stringify(out.snapshot);
+    out = resume(programSource, snapshotJson, deliveries);
+
     if (iter === MAX_ITERS - 1) throw new Error("effect driver exceeded MAX_ITERS (non-converging effect loop)");
   }
-  return { value: valueToJs(last.result), events: eventsToJs(last), journal: jrnl, state: stateAccum };
+  throw new Error("effect driver exceeded MAX_ITERS (non-converging effect loop)");
 }
 
 // ---- REPLAY run: no I/O, return journaled results in order --------------
 // Synchronous and pure: same journal => identical value, events, state.
 // returns { value, events, state }
 export function runReplay(programSource, journal, { input = {}, state = {} } = {}) {
-  const inputAccum = { ...input };
-  let stateAccum = { ...state };
+  const inputAccum = { ...input }; // initial seed for runEffectStart only
+  const stateAccum = { ...state }; // initial seed for runEffectStart only
   let qi = 0;
-  let last;
+  let out = start(programSource, inputAccum, stateAccum);
+
   for (let iter = 0; iter < MAX_ITERS; iter++) {
-    const out = step(programSource, inputAccum, stateAccum);
-    last = out;
-    stateAccum = out.state;
-    const pending = out._intents.filter((i) => !(correlationKey(i, i.payloadJs) in inputAccum));
-    if (pending.length === 0) break;
-    for (const i of pending) {
-      const key = correlationKey(i, i.payloadJs);
-      const entry = journal[qi++];
-      if (!entry) throw new Error(`journal exhausted: no recorded result for effect '${i.type_}' key '${key}'`);
-      if (entry.key !== key || entry.type_ !== i.type_) {
-        throw new Error(`journal mismatch at ${qi - 1}: expected ${i.type_}/${key}, journal has ${entry.type_}/${entry.key}`);
-      }
-      inputAccum[key] = entry.result; // already a tagless Value
+    if (out.status === "completed") {
+      return { value: valueToJs(out.result), events: eventsToJs(out), state: out.state };
     }
+    if (out.status !== "suspended") {
+      throw new Error(`VM ${out.status}: expected suspended/completed`);
+    }
+
+    const pendingRaw = Array.isArray(out.pending) ? out.pending : [];
+    const pending = pendingRaw.map(normalizePending);
+    if (pending.length === 0) {
+      throw new Error("VM returned status 'suspended' with no pending effects");
+    }
+
+    const deliveries = [];
+    for (const p of pending) {
+      const entry = journal[qi++];
+      if (!entry) throw new Error(`journal exhausted: no recorded result for effect '${p.type_}' key '${p.key}'`);
+      if (entry.pid !== p.pid || entry.key !== p.key || entry.type_ !== p.type_) {
+        throw new Error(
+          `journal mismatch at ${qi - 1}: expected ${p.pid}/${p.type_}/${p.key}, ` +
+          `journal has ${entry.pid}/${entry.type_}/${entry.key}`
+        );
+      }
+      deliveries.push({ pid: p.pid, key: p.key, result: entry.result }); // already tagless Value
+    }
+
+    const snapshotJson = JSON.stringify(out.snapshot);
+    out = resume(programSource, snapshotJson, deliveries);
+
+    if (iter === MAX_ITERS - 1) throw new Error("effect replay exceeded MAX_ITERS (non-converging effect loop)");
   }
-  return { value: valueToJs(last.result), events: eventsToJs(last), state: stateAccum };
+  throw new Error("effect replay exceeded MAX_ITERS (non-converging effect loop)");
 }

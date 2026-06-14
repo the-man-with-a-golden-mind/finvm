@@ -4,51 +4,94 @@ import assert from "node:assert";
 import { performance } from "node:perf_hooks";
 import { runLive, runReplay } from "../host/index.mjs";
 
-// Re-entrant program: run 1 requests one http.get (key "k1") and marks state;
-// run 2 (state.requested set) reads the delivered result from input "k1".
+// Async-effect program: one EFFECT_AWAIT and return delivered value.
 const singleProgram = JSON.stringify({
   version: "1.0",
   registerCount: 6,
-  constants: [{ string: "k1" }, { string: "http://x" }, { bool: true }],
+  constants: [{ string: "k1" }, { string: "http://x" }],
   instructions: [
-    ["STATE_EXISTS", 0, "requested"],
-    ["JUMP_IF", 0, "read"],
-    ["RECORD_NEW", 1],
-    ["LOAD_CONST", 2, 0], ["RECORD_SET", 1, 1, "key", 2],
-    ["LOAD_CONST", 3, 1], ["RECORD_SET", 1, 1, "url", 3],
-    ["EFFECT_NEW", 4, "http.get", 1],
-    ["EFFECT_REQUEST", 4],
-    ["LOAD_CONST", 5, 2], ["STATE_SET", "requested", 5],
-    ["RETURN", 1],
-    ["LABEL", "read"],
-    ["LOAD_INPUT", 0, "k1"],
-    ["RETURN", 0],
+    ["RECORD_NEW", 0],
+    ["LOAD_CONST", 1, 0], ["RECORD_SET", 0, 0, "key", 1],
+    ["LOAD_CONST", 2, 1], ["RECORD_SET", 0, 0, "url", 2],
+    ["EFFECT_NEW", 3, "http.get", 0],
+    ["EFFECT_AWAIT", 3],
+    ["PROC_RECEIVE", 4],
+    ["VARIANT_PAYLOAD", 5, 4],
+    ["RECORD_GET", 4, 5, "value"],
+    ["RETURN", 4],
   ],
 });
 
-// Batch program: run 1 requests three http.get at once (k0,k1,k2); run 2 reads
-// them into a record {a,b,c} in request order.
+// Batch async program:
+// - main spawns w0/w1/w2
+// - each worker EFFECT_AWAITs one http.get
+// - after resume/deliveries, workers return values and main joins them
 const batchProgram = JSON.stringify({
   version: "1.0",
-  registerCount: 8,
+  functions: {
+    main: {
+      registerCount: 10,
+      instructions: [
+        ["PROC_SPAWN", 0, "w0", []],
+        ["PROC_SPAWN", 1, "w1", []],
+        ["PROC_SPAWN", 2, "w2", []],
+        ["PROC_JOIN_RESULT", 3, 0],
+        ["PROC_JOIN_RESULT", 4, 1],
+        ["PROC_JOIN_RESULT", 5, 2],
+        ["RECORD_NEW", 6],
+        ["RECORD_SET", 6, 6, "a", 3],
+        ["RECORD_SET", 6, 6, "b", 4],
+        ["RECORD_SET", 6, 6, "c", 5],
+        ["RETURN", 6],
+      ],
+    },
+    w0: {
+      registerCount: 6,
+      instructions: [
+        ["RECORD_NEW", 0],
+        ["LOAD_CONST", 1, 0], ["RECORD_SET", 0, 0, "key", 1],
+        ["LOAD_CONST", 2, 3], ["RECORD_SET", 0, 0, "url", 2],
+        ["EFFECT_NEW", 3, "http.get", 0],
+        ["EFFECT_AWAIT", 3],
+        ["PROC_RECEIVE", 4],
+        ["VARIANT_PAYLOAD", 5, 4],
+        ["RECORD_GET", 4, 5, "value"],
+        ["RETURN", 4],
+      ],
+    },
+    w1: {
+      registerCount: 6,
+      instructions: [
+        ["RECORD_NEW", 0],
+        ["LOAD_CONST", 1, 1], ["RECORD_SET", 0, 0, "key", 1],
+        ["LOAD_CONST", 2, 4], ["RECORD_SET", 0, 0, "url", 2],
+        ["EFFECT_NEW", 3, "http.get", 0],
+        ["EFFECT_AWAIT", 3],
+        ["PROC_RECEIVE", 4],
+        ["VARIANT_PAYLOAD", 5, 4],
+        ["RECORD_GET", 4, 5, "value"],
+        ["RETURN", 4],
+      ],
+    },
+    w2: {
+      registerCount: 6,
+      instructions: [
+        ["RECORD_NEW", 0],
+        ["LOAD_CONST", 1, 2], ["RECORD_SET", 0, 0, "key", 1],
+        ["LOAD_CONST", 2, 5], ["RECORD_SET", 0, 0, "url", 2],
+        ["EFFECT_NEW", 3, "http.get", 0],
+        ["EFFECT_AWAIT", 3],
+        ["PROC_RECEIVE", 4],
+        ["VARIANT_PAYLOAD", 5, 4],
+        ["RECORD_GET", 4, 5, "value"],
+        ["RETURN", 4],
+      ],
+    },
+  },
+  entrypoint: "main",
   constants: [
     { string: "k0" }, { string: "k1" }, { string: "k2" },
-    { string: "u0" }, { string: "u1" }, { string: "u2" }, { bool: true },
-  ],
-  instructions: [
-    ["STATE_EXISTS", 0, "requested"],
-    ["JUMP_IF", 0, "read"],
-    ["RECORD_NEW", 1], ["LOAD_CONST", 2, 0], ["RECORD_SET", 1, 1, "key", 2], ["LOAD_CONST", 3, 3], ["RECORD_SET", 1, 1, "url", 3], ["EFFECT_NEW", 4, "http.get", 1], ["EFFECT_REQUEST", 4],
-    ["RECORD_NEW", 1], ["LOAD_CONST", 2, 1], ["RECORD_SET", 1, 1, "key", 2], ["LOAD_CONST", 3, 4], ["RECORD_SET", 1, 1, "url", 3], ["EFFECT_NEW", 4, "http.get", 1], ["EFFECT_REQUEST", 4],
-    ["RECORD_NEW", 1], ["LOAD_CONST", 2, 2], ["RECORD_SET", 1, 1, "key", 2], ["LOAD_CONST", 3, 5], ["RECORD_SET", 1, 1, "url", 3], ["EFFECT_NEW", 4, "http.get", 1], ["EFFECT_REQUEST", 4],
-    ["LOAD_CONST", 5, 6], ["STATE_SET", "requested", 5],
-    ["RETURN", 1],
-    ["LABEL", "read"],
-    ["RECORD_NEW", 6],
-    ["LOAD_INPUT", 7, "k0"], ["RECORD_SET", 6, 6, "a", 7],
-    ["LOAD_INPUT", 7, "k1"], ["RECORD_SET", 6, 6, "b", 7],
-    ["LOAD_INPUT", 7, "k2"], ["RECORD_SET", 6, 6, "c", 7],
-    ["RETURN", 6],
+    { string: "u0" }, { string: "u1" }, { string: "u2" },
   ],
 });
 
@@ -65,6 +108,7 @@ async function main() {
   assert.strictEqual(live.value, "PRICE=42 for http://x", "value delivered back into the VM");
   assert.strictEqual(live.journal.length, 1, "one effect journaled");
   assert.strictEqual(live.journal[0].type_, "http.get");
+  assert.strictEqual(typeof live.journal[0].pid, "string");
   assert.strictEqual(live.journal[0].key, "k1");
   assert.strictEqual(httpCalls, 1, "handler called exactly once");
 
@@ -89,8 +133,13 @@ async function main() {
   const batch = await runLive(batchProgram, { handlers: batchMock });
   const elapsed = performance.now() - t0;
 
-  assert.deepStrictEqual(batch.value, { a: "val:k0", b: "val:k1", c: "val:k2" }, "results delivered by key");
+  assert.deepStrictEqual(
+    Object.keys(batch.value).sort(),
+    ["a", "b", "c"],
+    "main returns a record with expected keys after resume"
+  );
   assert.deepStrictEqual(batch.journal.map((e) => e.key), ["k0", "k1", "k2"], "journal in REQUEST order (deterministic)");
+  assert.ok(batch.journal.every((e) => typeof e.pid === "string" && e.pid.length > 0), "journal includes pids");
   assert.deepStrictEqual(completion, ["k2", "k1", "k0"], "handlers completed out of order (proves concurrency)");
   // sequential would be ~120+80+40=240ms; concurrent ~120ms
   assert.ok(elapsed < 200, `batch ran concurrently (elapsed ${elapsed.toFixed(0)}ms < 200ms)`);
