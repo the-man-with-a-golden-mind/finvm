@@ -70,6 +70,7 @@ npm run bench       # FinVM vs native JS, and VM-DB vs native data structures
 - [ARCHITECTURE.md](ARCHITECTURE.md) — code structure & execution pipeline
 - [TESTING.md](TESTING.md) — test/fuzz/stress/bench harnesses
 - [DECISIONS.md](DECISIONS.md) — architecture decision records
+- [EFFECTS.md](EFFECTS.md) — host effect driver, intent contract, journal (record/replay)
 - [DATABASE.md](DATABASE.md) — DB/cache FFI
 - [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) — known gaps & history
 - `../LLM.txt` — compact compiler-target reference

@@ -9,18 +9,24 @@
   "files": [
     "dist",
     "bin",
+    "host",
     "src/FinVM/FFI",
     "docs",
     "LLM.txt"
   ],
   "scripts": {
-    "test": "npm run test:purs && npm run test:js",
+    "test": "npm run test:purs && npm run test:js && npm run test:driver",
     "test:purs": "spago test",
     "test:js": "node test/db_test.js",
+    "test:driver": "node test/driver_test.js",
     "fuzz": "node test/fuzz.js",
     "stress": "node bench/stress.js",
     "bench": "node bench/vm_vs_js_benchmark.js",
-    "build": "spago build && esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer"
+    "build": "spago build && npm run bundle",
+    "bundle": "npm run bundle:core && npm run bundle:api && npm run bundle:browser",
+    "bundle:core": "esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer",
+    "bundle:api": "esbuild output/FinVM.Encoding.Json/index.js --bundle --platform=node --outfile=dist/finvm-api.js --format=esm --external:big-integer",
+    "bundle:browser": "esbuild output/FinVM.Encoding.Json/index.js --bundle --platform=browser --outfile=dist/finvm-api.browser.js --format=esm --external:node:fs/promises"
   },
   "keywords": [
     "vm",

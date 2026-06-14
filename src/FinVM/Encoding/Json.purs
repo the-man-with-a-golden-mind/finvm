@@ -2,6 +2,7 @@ module FinVM.Encoding.Json
   ( decodeProgramFile
   , runJsonProgram
   , runJsonProgramResult
+  , runEffectStep
   , errorJson
   , valueToJson
   , decodeValue
@@ -160,6 +161,63 @@ runJsonProgramResult source =
           , Tuple "error" (Json.fromString msg)
           ]
       }
+
+-- | Rich entry point for the host EFFECT DRIVER. Runs the program once with the
+-- | given input/state overrides merged on top of the program's own, and returns
+-- | JSON exposing everything the driver needs to fulfil effects and resume:
+-- |   { status, steps, result, state, events:[{type_,payload}], outbox:[{type_,payload}] }
+-- | `events` and `outbox` are returned in emit/request order. The driver performs
+-- | the outbox intents, writes each result into `input` under the intent's
+-- | correlation key, carries `state` forward, and calls this again until the
+-- | outbox yields no new effects. The VM core stays pure; only the driver is
+-- | effectful. `overridesSource` is "" or a JSON object { "input": {..}, "state": {..} }
+-- | whose values use the tagless Value encoding.
+runEffectStep :: String -> String -> String
+runEffectStep programSource overridesSource =
+  case decodeProgramFile programSource of
+    Left err -> failStr "error" err
+    Right file -> case decodeOverrides overridesSource of
+      Left err -> failStr "error" err
+      Right ov ->
+        let
+          base = initialMachine file
+          m0 = base { input = Map.union ov.inputOv base.input
+                    , state = Map.union ov.stateOv base.state }
+        in case Eval.runMachine m0 of
+          Left vmErr -> failStr "failed" (renderVMError vmErr)
+          Right m -> Json.stringify $ objectJson
+            [ Tuple "status" (Json.fromString "completed")
+            , Tuple "steps" (Json.fromNumber (Int.toNumber m.counters.steps))
+            , Tuple "result" (valueToJson (mainResult m))
+            , Tuple "state" (stringMapToJson m.state)
+            , Tuple "events" (Json.fromArray (taggedPayloadToJson <$> orderedList m.events))
+            , Tuple "outbox" (Json.fromArray (taggedPayloadToJson <$> orderedList m.outbox))
+            ]
+  where
+    failStr status msg = Json.stringify $ objectJson
+      [ Tuple "status" (Json.fromString status), Tuple "error" (Json.fromString msg) ]
+
+-- Lists in the machine (events/outbox) are built with cons (reverse order); turn
+-- them into an array in emit/request order.
+orderedList :: forall a. List.List a -> Array a
+orderedList = Array.reverse <<< List.toUnfoldable
+
+-- Event and EffectIntent are both { type_ :: String, payload :: Value }.
+taggedPayloadToJson :: { type_ :: String, payload :: Value } -> Json.Json
+taggedPayloadToJson t = objectJson
+  [ Tuple "type_" (Json.fromString t.type_)
+  , Tuple "payload" (valueToJson t.payload)
+  ]
+
+decodeOverrides :: String -> Either String { inputOv :: Map String Value, stateOv :: Map String Value }
+decodeOverrides s =
+  if s == "" then Right { inputOv: Map.empty, stateOv: Map.empty }
+  else do
+    root <- jsonParser s
+    obj <- asObject "overrides" root
+    inputOv <- optionalObjectMap "input" obj decodeValue
+    stateOv <- optionalObjectMap "state" obj decodeValue
+    pure { inputOv, stateOv }
 
 mkMainFunction :: Int -> Array Instruction -> VMFunction.Function
 mkMainFunction registerCount instructions =

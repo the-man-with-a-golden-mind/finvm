@@ -96,6 +96,7 @@ constant and halts:
 - [docs/TESTING.md](docs/TESTING.md) — spec / fuzz / stress / benchmark harnesses
 - [docs/DECISIONS.md](docs/DECISIONS.md) — architecture decision records
 - [docs/AGENTS.md](docs/AGENTS.md) — orientation for AI/automation working in the repo
+- [docs/EFFECTS.md](docs/EFFECTS.md) — host effect driver (real I/O), intent contract, journal record/replay
 - [docs/DATABASE.md](docs/DATABASE.md) — the encrypted/indexed/persistent DB and cache FFI
 - [docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md) — known gaps and change history
 - [LLM.txt](LLM.txt) — compact compiler-target reference for LLM/codegen consumers
