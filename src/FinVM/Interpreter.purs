@@ -32,6 +32,9 @@ import FinVM.Vec as Vec
 import FinVM.Error (VMError(..), ErrorCode(..))
 import FinVM.Error as VMErrorCode
 
+remoteMonitorPrefix :: String
+remoteMonitorPrefix = "__remote__:"
+
 -- | Executes one instruction for a given process, updating the Machine and Process state.
 stepProcess :: Machine -> Process -> Either VMError (Tuple Machine Process)
 stepProcess m p = do
@@ -544,6 +547,32 @@ evalInstruction m p func inst =
           else pure $ Tuple (m { outbox = List.Cons e m.outbox }) pNextPc
       _ -> Left $ VMError TypeMismatch "EFFECT_REQUEST requires an EffectIntent"
 
+  -- Async effect: suspend ONLY this process on the effect's correlation key and
+  -- record the request (tagged with pid + key) in the outbox for the host driver.
+  -- pc is advanced, so on resume (woken by the reply message) the process
+  -- continues after the await and reads the reply via PROC_RECEIVE.
+  EFFECT_AWAIT intentReg -> do
+    v <- readReg p intentReg
+    case v of
+      VEffectIntent e -> case awaitKey e.payload of
+        Nothing -> Left $ VMError TypeMismatch "EFFECT_AWAIT payload must be a record with a string 'key'"
+        Just key ->
+          if List.length m.outbox >= m.config.limits.maxEffectsRequested
+            then Left $ VMError TraceLimitExceeded "EFFECT_AWAIT exceeded maxEffectsRequested"
+            else
+              let
+                tagged =
+                  { type_: e.type_
+                  , payload: VRecord (Map.fromFoldable
+                      [ Tuple "pid" (VString p.pid)
+                      , Tuple "key" (VString key)
+                      , Tuple "payload" e.payload
+                      ])
+                  }
+                m' = m { outbox = List.Cons tagged m.outbox }
+              in pure $ Tuple m' (pNextPc { status = ProcessWaiting (WaitingOnEffect key) })
+      _ -> Left $ VMError TypeMismatch "EFFECT_AWAIT requires an EffectIntent"
+
   EFFECT_BATCH_NEW dst ->
     pure $ Tuple m (writeReg pNextPc dst (VList Vec.empty))
 
@@ -775,14 +804,47 @@ evalInstruction m p func inst =
     remotePid <- readReg p remotePidReg
     case remotePid of
       VRemoteProcessRef r ->
-        let ref = "rmon" <> show m.counters.steps <> ":" <> r.pid
-        in pure $ Tuple m (writeReg pNextPc dst (VString ref))
+        let
+          ref = "rmon" <> show m.counters.steps <> ":" <> r.pid
+          node = case r.node of
+            NodeRef n -> n
+          target = encodeRemoteMonitorTarget node r.pid
+          intent =
+            { type_: "RemoteMonitorIntent"
+            , payload: VRecord (Map.fromFoldable
+                [ Tuple "pid" (VString p.pid)
+                , Tuple "ref" (VString ref)
+                , Tuple "node" (VString node)
+                , Tuple "remotePid" (VString r.pid)
+                ])
+            }
+          m' = m { outbox = List.Cons intent m.outbox }
+          p' = pNextPc { monitors = Map.insert ref target p.monitors }
+        in pure $ Tuple m' (writeReg p' dst (VString ref))
       _ -> Left $ VMError TypeMismatch "NODE_MONITOR requires a RemoteProcessRef"
 
   NODE_DEMONITOR refReg -> do
     ref <- readReg p refReg
     case ref of
-      VString _ -> pure $ Tuple m pNextPc
+      VString monitorRef ->
+        let
+          previousTarget = Map.lookup monitorRef p.monitors
+          p' = pNextPc { monitors = Map.delete monitorRef p.monitors }
+        in case previousTarget >>= decodeRemoteMonitorTarget of
+          Just remote ->
+            let
+              intent =
+                { type_: "RemoteDemonitorIntent"
+                , payload: VRecord (Map.fromFoldable
+                    [ Tuple "pid" (VString p.pid)
+                    , Tuple "ref" (VString monitorRef)
+                    , Tuple "node" (VString remote.node)
+                    , Tuple "remotePid" (VString remote.pid)
+                    ])
+                }
+              m' = m { outbox = List.Cons intent m.outbox }
+            in pure $ Tuple m' p'
+          Nothing -> pure $ Tuple m p'
       _ -> Left $ VMError TypeMismatch "NODE_DEMONITOR requires a String monitor reference"
 
   NODE_OBSERVE_STATE dst nodeReg -> do
@@ -950,6 +1012,29 @@ readReg :: Process -> Int -> Either VMError Value
 readReg p r = case Array.index p.frame.registers r of
   Nothing -> Left $ VMError InvalidRegister ("Register " <> show r <> " out of bounds")
   Just v -> pure v
+
+-- The correlation key from an effect intent payload (a record with a string "key").
+awaitKey :: Value -> Maybe String
+awaitKey = case _ of
+  VRecord fields -> case Map.lookup "key" fields of
+    Just (VString k) -> Just k
+    _ -> Nothing
+  _ -> Nothing
+
+encodeRemoteMonitorTarget :: String -> String -> String
+encodeRemoteMonitorTarget node pid = remoteMonitorPrefix <> node <> ":" <> pid
+
+decodeRemoteMonitorTarget :: String -> Maybe { node :: String, pid :: String }
+decodeRemoteMonitorTarget target = do
+  rest <- String.stripPrefix (String.Pattern remoteMonitorPrefix) target
+  case String.lastIndexOf (String.Pattern ":") rest of
+    Nothing -> Nothing
+    Just idx ->
+      let
+        node = String.take idx rest
+        pid = String.drop (idx + 1) rest
+      in
+        if node == "" || pid == "" then Nothing else Just { node, pid }
 
 -- Helper to write a register.
 -- The Nothing branch is unreachable for validated programs: Validate ensures

@@ -77,3 +77,44 @@ spec = do
                 _ -> fail "Expected VRecord payload"
             _ -> fail "Expected exactly one intent")
 
+    it "emits RemoteMonitorIntent and RemoteDemonitorIntent and clears monitor ref" do
+      let
+        monitorProgram =
+          { version: "1.0", constants: [ VString "other", VString "p42" ], functions: Map.fromFoldable
+              [ Tuple "main"
+                  { id: "main", arity: 0, registerCount: 5, parameterTypes: [], returnType: TUnit
+                  , instructions:
+                      [ LOAD_CONST 1 0
+                      , LOAD_CONST 2 1
+                      , REMOTE_PID_NEW 0 1 2
+                      , NODE_MONITOR 3 0
+                      , NODE_DEMONITOR 3
+                      , HALT 3
+                      ]
+                  , debug: { name: "main" }, proof: { isInvariant: false }
+                  }
+              ]
+          , stateMachines: Map.empty
+          , entrypoint: "main", exports: Map.empty
+          , metadata: { description: "" }, typeTable: Map.empty, capabilities: [], verification: { verified: true }
+          }
+        monitorMachine = machine { program = monitorProgram }
+      case Eval.runMachine monitorMachine of
+        Left err -> fail $ show err
+        Right m' -> do
+          case m'.outbox of
+            List.Cons demonitorIntent (List.Cons monitorIntent List.Nil) -> do
+              demonitorIntent.type_ `shouldEqual` "RemoteDemonitorIntent"
+              monitorIntent.type_ `shouldEqual` "RemoteMonitorIntent"
+              case demonitorIntent.payload, monitorIntent.payload of
+                VRecord demonitorFields, VRecord monitorFields -> do
+                  Map.lookup "node" monitorFields `shouldEqual` Just (VString "other")
+                  Map.lookup "remotePid" monitorFields `shouldEqual` Just (VString "p42")
+                  Map.lookup "node" demonitorFields `shouldEqual` Just (VString "other")
+                  Map.lookup "remotePid" demonitorFields `shouldEqual` Just (VString "p42")
+                _, _ -> fail "Expected VRecord payloads for monitor intents"
+            _ -> fail "Expected monitor + demonitor intents"
+          case Map.lookup "main" m'.scheduler.processes of
+            Nothing -> fail "main process missing"
+            Just p -> Map.isEmpty p.monitors `shouldEqual` true
+

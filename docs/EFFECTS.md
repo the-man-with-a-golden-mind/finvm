@@ -60,6 +60,17 @@ The host now uses the snapshot/resume API, not whole-program re-run:
 This model suspends only the waiting process (`EFFECT_AWAIT`) while other actors
 can continue running and mutating state before quiescence.
 
+### Remote monitor intents and disconnect delivery
+- `NODE_MONITOR` emits `RemoteMonitorIntent` and stores a monitor ref in-process.
+- `NODE_DEMONITOR` removes that ref and emits `RemoteDemonitorIntent`.
+- The host can notify a transport/node break with a resume delivery:
+  `{ "disconnect": { "node": "<nodeName>", "reason": "<optional>" } }`.
+- On resume, every process monitoring remote refs on that node receives a mailbox
+  `DOWN` message (`{ tag: "DOWN", payload: { ref, pid, reason } }` in VM Value
+  form), those monitor refs are removed, and waiters blocked on mailbox/monitor are
+  woken deterministically.
+- If `reason` is omitted, VM defaults to `"noconnection"`.
+
 ## 4. Concurrency + determinism
 When a single quiescent step exposes multiple `pending` effects, the driver may
 perform them **concurrently** (`Promise.all`), but it must:
@@ -83,6 +94,10 @@ The journal is a serializable array, in request order:
 - **replay:** `runReplay` consumes the next journal entry *without performing I/O*.
   Mismatch on `pid`/`key`/`type_` (or exhausted journal) is a hard error.
   Same program + same journal => identical `value`, `events`, and `state`.
+
+For node disconnects, the host injects a `disconnect` delivery when resuming. That
+signal is external transport state, so it is replay-safe as long as it is provided
+explicitly in the same resume input.
 
 A crashed bot persists its journal, `runReplay`s it to restore state, then switches
 to `runLive` to go live again. If you ever add time/randomness, journal it too

@@ -207,6 +207,32 @@ async function main() {
   assert.strictEqual(bResume.status, "completed", "receiver resumes and consumes delivered message");
   assert.deepStrictEqual(bResume.result, { string: "PING" }, "receiver gets remote actor message");
 
+  // --- 7. Remote monitor disconnect -> DOWN mailbox message ---
+  console.log("7. remote monitor disconnect delivery");
+  const monitorProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 7,
+    constants: [{ string: "vmB" }, { string: "remote-1" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["NODE_MONITOR", 3, 0],
+      ["PROC_RECEIVE", 4],
+      ["VARIANT_PAYLOAD", 5, 4],
+      ["RECORD_GET", 6, 5, "reason"],
+      ["RETURN", 6],
+    ],
+  });
+  const mStart = JSON.parse(runEffectStart(monitorProgram)(""));
+  assert.strictEqual(mStart.status, "suspended", "monitoring process suspends with pending monitor intent");
+  assert.strictEqual(mStart.pending.length, 1, "single monitor intent pending");
+  assert.strictEqual(mStart.pending[0].type_, "RemoteMonitorIntent");
+  const mDeliveries = JSON.stringify([{ disconnect: { node: "vmB", reason: "net-split" } }]);
+  const mResume = JSON.parse(runEffectResume(monitorProgram)(JSON.stringify(mStart.snapshot))(mDeliveries));
+  assert.strictEqual(mResume.status, "completed", "disconnect wakes monitor with DOWN");
+  assert.deepStrictEqual(mResume.result, { string: "net-split" }, "disconnect reason propagates via DOWN payload");
+
   console.log("All effect driver tests passed. 🚀");
 }
 

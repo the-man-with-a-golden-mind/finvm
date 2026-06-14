@@ -216,6 +216,26 @@ outOfOrderReplayProgram =
   }
   """
 
+remoteMonitorDisconnectProgram :: String
+remoteMonitorDisconnectProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 7,
+    "constants": [ { "string": "other" }, { "string": "p42" } ],
+    "instructions": [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["NODE_MONITOR", 3, 0],
+      ["PROC_RECEIVE", 4],
+      ["VARIANT_PAYLOAD", 5, 4],
+      ["RECORD_GET", 6, 5, "reason"],
+      ["RETURN", 6]
+    ]
+  }
+  """
+
 obj :: String -> Maybe (Object.Object Json.Json)
 obj s = case jsonParser s of
   Right j -> Json.toObject j
@@ -364,3 +384,36 @@ spec = do
                           aVal `shouldEqual` Just "V0"
                           bVal `shouldEqual` Just "V1"
                     _ -> fail ("missing pid for k0/k1 in pending: " <> out1)
+
+    it "remote disconnect emits DOWN-like mailbox message for NODE_MONITOR refs" do
+      let out1 = runEffectStart remoteMonitorDisconnectProgram ""
+      case obj out1 of
+        Nothing -> fail ("not an object: " <> out1)
+        Just o1 -> do
+          (Object.lookup "status" o1 >>= Json.toString) `shouldEqual` Just "suspended"
+          let firstPending = Object.lookup "pending" o1 >>= Json.toArray >>= Array.head >>= Json.toObject
+          (firstPending >>= Object.lookup "type_" >>= Json.toString) `shouldEqual` Just "RemoteMonitorIntent"
+          case Object.lookup "snapshot" o1 of
+            Nothing -> fail ("no snapshot in: " <> out1)
+            Just snap -> do
+              let snapStr = Json.stringify snap
+                  deliveries = """[{ "disconnect": { "node": "other", "reason": "net-split" } }]"""
+                  out2 = runEffectResume remoteMonitorDisconnectProgram snapStr deliveries
+              case obj out2 of
+                Nothing -> fail ("not an object: " <> out2)
+                Just o2 -> do
+                  (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "completed"
+                  let reason = Object.lookup "result" o2 >>= Json.toObject
+                        >>= Object.lookup "string" >>= Json.toString
+                  reason `shouldEqual` Just "net-split"
+
+    it "disconnect replay is deterministic for same snapshot and deliveries" do
+      let out1 = runEffectStart remoteMonitorDisconnectProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries = """[{ "disconnect": { "node": "other", "reason": "noconnection" } }]"""
+              out2 = runEffectResume remoteMonitorDisconnectProgram snapStr deliveries
+              out3 = runEffectResume remoteMonitorDisconnectProgram snapStr deliveries
+          out2 `shouldEqual` out3

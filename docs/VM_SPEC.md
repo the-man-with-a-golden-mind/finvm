@@ -109,6 +109,11 @@ the host interprets them.
 `NODE_SPAWN`, `NODE_MONITOR`, `NODE_DEMONITOR`, `NODE_OBSERVE_STATE`,
 `NODE_LAST_STATE_HASH`, `NODE_LAST_SEEN_TICK`, `NODE_QUERY_STATE`.
 
+`NODE_MONITOR` emits `RemoteMonitorIntent` and records a monitor ref in the
+process; `NODE_DEMONITOR` removes that ref and emits `RemoteDemonitorIntent`.
+Hosts may inject `{ disconnect: { node, reason? } }` deliveries on resume, which
+produce `DOWN` mailbox messages for matching remote monitor refs.
+
 **State machines:** `MACHINE_NEW dst defId initReg`, `MACHINE_STATE dst inst`,
 `MACHINE_TRANSITION dst inst event`.
 
@@ -157,6 +162,8 @@ forever). Other overruns produce structured `VMError`s.
   same instruction when woken. `PROC_SLEEP_TICKS` waits on a logical tick.
 - On termination, monitoring processes receive a DOWN message
   (`VVariant "DOWN" { ref, pid, reason }`) and the monitor entry is cleared.
+- Remote-node disconnect deliveries apply the same DOWN semantics to remote monitor
+  refs (and clear them) in a deterministic, snapshot/resume-safe way.
 - Snapshots/replay (`Encoding/Snapshot.purs`) canonicalize state for stable
   hashing; the in-memory cache FFI is intentionally **excluded** from snapshots, so
   cache contents must never influence program output.
