@@ -44,6 +44,31 @@ Persistence (`commit`/`load`) encrypts the entire store with **AES-256-GCM**. Th
 ## Deterministic Table Hash (`db.hash`)
 `db.hash(table)` returns a **SHA-256** hex digest computed over the table's rows sorted by id and canonicalized with sorted keys. It is therefore stable across runs and independent of record key-insertion order, and is collision-resistant — suitable for proof-of-state checks.
 
+## Node / browser portability (100% compatible)
+The DB is fully portable across backend and frontend, with byte-identical results:
+- **SHA-256** (`db.hash`, and the VM's `hash.sha256`) is a pure-JS implementation — no `node:crypto`, synchronous, identical output in Node and the browser.
+- **AES-256-GCM + PBKDF2** use `globalThis.crypto` (Web Crypto), available in browsers and Node ≥ 20. The encrypted bundle format (`{ v, salt, iv, data }`) is identical on both ends.
+- **Persistence backend differs by environment** (browsers have no filesystem): the browser writes the encrypted bundle to `localStorage` (`finvm_db_enc`); Node writes the `.finvm.db` file via a dynamically-imported `node:fs/promises` (never loaded in the browser). The on-the-wire encrypted bytes are the same, so a store committed in one environment can be loaded in the other if the bytes are transferred.
+
+## Moving a DB across environments (browser → cloud → desktop)
+The encrypted bundle is a single portable string; move it however you like:
+```js
+// Browser: build, hash, export
+await db.setKey(passphrase);
+await db.insert("accounts", { owner: "alice", balance: 100 });
+const hash = db.hashTable("accounts");      // record for integrity
+const blob = await db.exportEncrypted();    // portable, encrypted string
+// -> upload `blob` (and optionally `hash`) to the cloud
+
+// Desktop (Node) later: download, import, verify
+const db2 = new FinVMDatabase();
+await db2.setKey(passphrase);               // same passphrase
+await db2.importEncrypted(blob);            // restore state
+assert(db2.hashTable("accounts") === hash); // same SHA-256 => intact
+```
+- `exportEncrypted()` → the AES-256-GCM bundle string (same bytes `commit()` would persist); `null` if no passphrase. `importEncrypted(blob)` decrypts with the set passphrase (wrong passphrase throws — GCM authentication).
+- Because SHA-256 is pure-JS and AES/PBKDF2 use Web Crypto, the bundle and the `db.hash` are **byte-identical across browser and Node** — the move is lossless and verifiable. `commit()`/`load()` are just `exportEncrypted`/`importEncrypted` wired to the environment's default store.
+
 ## Cache vs. Determinism
 The Cache FFI (`cache.*`) is an **in-memory, non-persisted performance aid**. Unlike the database (whose contents flow through canonical encoding) the cache is host-side mutable state that is **not** part of the VM state, snapshot, or replay hash (see `FinVM.Encoding.Snapshot`). Consequently:
 

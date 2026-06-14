@@ -117,6 +117,35 @@ async function runTests() {
         assert.strictEqual(e.code, 'ENOENT', "File must not exist");
     }
 
+    // Test 7: Portable export/import (browser <-> cloud <-> node movement)
+    // The encrypted bundle string is environment-agnostic (globalThis.crypto +
+    // pure-JS SHA-256), so a DB exported in one place imports anywhere with the
+    // same passphrase. Two independent instances stand in for two environments.
+    console.log("7. Testing portable export/import (cross-environment movement)...");
+    const origin = new FinVMDatabase();           // e.g. the browser
+    await origin.setKey("portable_passphrase_xyz");
+    origin.createIndex("accounts", "owner");
+    await origin.insert("accounts", { owner: "alice", balance: 100 });
+    await origin.insert("accounts", { owner: "bob", balance: 50 });
+    const originHash = origin.hashTable("accounts");
+    const blob = await origin.exportEncrypted();   // -> upload to the cloud
+    assert.ok(typeof blob === "string" && blob.length > 0, "export produces a portable string");
+    assert.ok(!blob.includes("alice"), "exported blob is encrypted (no plaintext)");
+
+    const dest = new FinVMDatabase();              // e.g. the desktop
+    await dest.setKey("portable_passphrase_xyz");
+    await dest.importEncrypted(blob);              // <- download from the cloud
+    const moved = dest.query("accounts", { owner: "alice" }, {});
+    assert.strictEqual(moved.length, 1, "imported DB is queryable");
+    assert.strictEqual(moved[0].content.balance, 100, "imported data intact");
+    assert.strictEqual(dest.hashTable("accounts"), originHash, "db.hash identical after move (integrity)");
+
+    // Wrong passphrase on import must fail (GCM auth)
+    const intruder = new FinVMDatabase();
+    await intruder.setKey("not_the_passphrase");
+    try { await intruder.importEncrypted(blob); assert.fail("import with wrong key must throw"); }
+    catch (e) { assert.ok(/operation failed|Unsupported state|decrypt/i.test(e.message), "wrong-key import rejected"); }
+
     // Cleanup
     try { await fs.unlink(dbFile); } catch (e) {}
     console.log("All DB Tests Passed Successfully! 🚀");
