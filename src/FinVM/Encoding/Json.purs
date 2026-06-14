@@ -23,7 +23,6 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
-import Data.String as String
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import FinVM.Error (VMError(..))
@@ -35,7 +34,7 @@ import FinVM.Instruction as I
 import FinVM.Limits (EvalLimits)
 import FinVM.Machine (Machine)
 import FinVM.Numeric.Rounding (Rounding(..))
-import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..))
 import FinVM.Process.Scheduler as Scheduler
 import FinVM.Encoding.Resume (encodeMachineState, decodeMachineState)
 import FinVM.Program (Program)
@@ -55,6 +54,15 @@ type JsonProgramFile =
   , limits :: EvalLimits
   , performanceMode :: Boolean
   }
+
+data PendingKind
+  = PendingAwaitReply
+  | PendingTransport
+
+data ResumeDelivery
+  = DeliveryEffectReply { pid :: String, key :: String, result :: Value }
+  | DeliveryMailboxMessage { pid :: String, message :: Value }
+  | DeliveryDisconnect { node :: String, reason :: String }
 
 decodeProgramFile :: String -> Either String JsonProgramFile
 decodeProgramFile source = do
@@ -307,34 +315,37 @@ pendingEntry e =
     getVal k = case Map.lookup k fields of
       Just v -> v
       _ -> VUnit
-    isAwaitTagged =
+    pendingKind =
       case Map.lookup "key" fields, Map.lookup "payload" fields of
-        Just (VString _), Just _ -> true
-        _, _ -> false
+        Just (VString _), Just _ -> PendingAwaitReply
+        _, _ -> PendingTransport
     pidVal =
-      if isAwaitTagged then getStr "pid"
-      else case Map.lookup "pid" fields of
-        Just (VString s) -> s
-        _ -> ""
+      case pendingKind of
+        PendingAwaitReply -> getStr "pid"
+        PendingTransport -> case Map.lookup "pid" fields of
+          Just (VString s) -> s
+          _ -> ""
     keyVal =
-      if isAwaitTagged then getStr "key" else ""
+      case pendingKind of
+        PendingAwaitReply -> getStr "key"
+        PendingTransport -> ""
     payloadVal =
-      if isAwaitTagged then getVal "payload" else e.payload
+      case pendingKind of
+        PendingAwaitReply -> getVal "payload"
+        PendingTransport -> e.payload
+    kindVal =
+      case pendingKind of
+        PendingAwaitReply -> "await_reply"
+        PendingTransport -> "transport"
   in objectJson
-    [ Tuple "pid" (Json.fromString pidVal)
+    [ Tuple "kind" (Json.fromString kindVal)
+    , Tuple "pid" (Json.fromString pidVal)
     , Tuple "key" (Json.fromString keyVal)
     , Tuple "type_" (Json.fromString e.type_)
     , Tuple "payload" (valueToJson payloadVal)
     ]
 
-decodeDeliveries :: String -> Either String
-  (Array
-    { pid :: Maybe String
-    , key :: Maybe String
-    , result :: Maybe Value
-    , message :: Maybe Value
-    , disconnect :: Maybe { node :: String, reason :: String }
-    })
+decodeDeliveries :: String -> Either String (Array ResumeDelivery)
 decodeDeliveries s =
   if s == "" then Right []
   else do
@@ -342,90 +353,65 @@ decodeDeliveries s =
     arr <- asArray "deliveries" root
     traverse decodeDelivery arr
 
-decodeDelivery :: Json.Json -> Either String
-  { pid :: Maybe String
-  , key :: Maybe String
-  , result :: Maybe Value
-  , message :: Maybe Value
-  , disconnect :: Maybe { node :: String, reason :: String }
-  }
+decodeDelivery :: Json.Json -> Either String ResumeDelivery
 decodeDelivery j = do
   o <- asObject "delivery" j
-  pid <- case Object.lookup "pid" o of
-    Just p -> Just <$> asString "pid" p
-    Nothing -> Right Nothing
-  result <- case Object.lookup "result" o of
-    Just r -> Just <$> decodeValue r
-    Nothing -> Right Nothing
-  message <- case Object.lookup "message" o of
-    Just r -> Just <$> decodeValue r
-    Nothing -> Right Nothing
-  key <- case Object.lookup "key" o of
-    Just k -> Just <$> asString "key" k
-    Nothing -> Right Nothing
-  disconnect <- case Object.lookup "disconnect" o of
-    Nothing -> Right Nothing
+  case Object.lookup "disconnect" o of
     Just d -> do
       dobj <- asObject "disconnect" d
       node <- requiredString "node" dobj
       reason <- case Object.lookup "reason" dobj of
         Just r -> asString "disconnect.reason" r
         Nothing -> pure "noconnection"
-      pure (Just { node, reason })
-  pure { pid, key, result, message, disconnect }
+      pure (DeliveryDisconnect { node, reason })
+    Nothing -> do
+      pid <- requiredString "pid" o
+      case Object.lookup "message" o, Object.lookup "key" o of
+        Just msg, _ -> do
+          message <- decodeValue msg
+          pure (DeliveryMailboxMessage { pid, message })
+        _, Just keyJ -> do
+          key <- asString "key" keyJ
+          result <- case Object.lookup "result" o of
+            Just r -> decodeValue r
+            Nothing -> pure VUnit
+          pure (DeliveryEffectReply { pid, key, result })
+        _, _ -> Left "delivery must contain either {pid,message}, {pid,key[,result]}, or {disconnect:{node[,reason]}}"
 
 -- Deliver an effect result to a process: append an EffectReply message to its
 -- mailbox and wake it if it was parked on this effect's key.
-applyDelivery :: Machine -> { pid :: Maybe String, key :: Maybe String, result :: Maybe Value, message :: Maybe Value, disconnect :: Maybe { node :: String, reason :: String } } -> Machine
-applyDelivery m d = case d.disconnect of
-  Just disc -> applyDisconnectDelivery m disc
-  Nothing -> case d.pid of
+applyDelivery :: Machine -> ResumeDelivery -> Machine
+applyDelivery m d = case d of
+  DeliveryDisconnect disc -> applyDisconnectDelivery m disc
+  DeliveryMailboxMessage payload -> case Scheduler.findProcess m.scheduler payload.pid of
     Nothing -> m
-    Just pid -> case Scheduler.findProcess m.scheduler pid of
-      Nothing -> m
-      Just p -> case d.message, d.key of
-        -- Generic mailbox delivery (used by cross-VM actor messaging).
-        Just msg, _ ->
-          let
-            wokenFor = case p.status of
-              ProcessWaiting WaitingForMessage -> true
-              _ -> false
-            p' = p
-              { mailbox = Array.snoc p.mailbox msg
-              , status = if wokenFor then ProcessReady else p.status
-              }
-            s1 = Scheduler.updateProcess m.scheduler p'
-            s2 = if wokenFor then Scheduler.yieldProcess s1 pid else s1
-          in m { scheduler = s2 }
-        -- Effect reply delivery (existing EFFECT_AWAIT path).
-        _, Just key ->
-          let
-            value = fromMaybe VUnit d.result
-            reply = VVariant "EffectReply" (VRecord (Map.fromFoldable [ Tuple "key" (VString key), Tuple "value" value ]))
-            wokenFor = case p.status of
-              ProcessWaiting (WaitingOnEffect k) -> k == key
-              _ -> false
-            p' = p
-              { mailbox = Array.snoc p.mailbox reply
-              , status = if wokenFor then ProcessReady else p.status
-              }
-            s1 = Scheduler.updateProcess m.scheduler p'
-            s2 = if wokenFor then Scheduler.yieldProcess s1 pid else s1
-          in m { scheduler = s2 }
-        -- Nothing to apply.
-        _, _ -> m
-
-remoteMonitorPrefix :: String
-remoteMonitorPrefix = "__remote__:"
-
-decodeRemoteMonitorTarget :: String -> Maybe { node :: String, pid :: String }
-decodeRemoteMonitorTarget target = do
-  rest <- String.stripPrefix (String.Pattern remoteMonitorPrefix) target
-  idx <- String.lastIndexOf (String.Pattern ":") rest
-  let
-    node = String.take idx rest
-    pid = String.drop (idx + 1) rest
-  if node == "" || pid == "" then Nothing else Just { node, pid }
+    Just p ->
+      let
+        wokenFor = case p.status of
+          ProcessWaiting WaitingForMessage -> true
+          _ -> false
+        p' = p
+          { mailbox = Array.snoc p.mailbox payload.message
+          , status = if wokenFor then ProcessReady else p.status
+          }
+        s1 = Scheduler.updateProcess m.scheduler p'
+        s2 = if wokenFor then Scheduler.yieldProcess s1 payload.pid else s1
+      in m { scheduler = s2 }
+  DeliveryEffectReply payload -> case Scheduler.findProcess m.scheduler payload.pid of
+    Nothing -> m
+    Just p ->
+      let
+        reply = VVariant "EffectReply" (VRecord (Map.fromFoldable [ Tuple "key" (VString payload.key), Tuple "value" payload.result ]))
+        wokenFor = case p.status of
+          ProcessWaiting (WaitingOnEffect k) -> k == payload.key
+          _ -> false
+        p' = p
+          { mailbox = Array.snoc p.mailbox reply
+          , status = if wokenFor then ProcessReady else p.status
+          }
+        s1 = Scheduler.updateProcess m.scheduler p'
+        s2 = if wokenFor then Scheduler.yieldProcess s1 payload.pid else s1
+      in m { scheduler = s2 }
 
 downMessage :: String -> String -> String -> Value
 downMessage ref pid reason =
@@ -442,10 +428,10 @@ applyDisconnectDelivery m disc =
     step scheduler p =
       let
         deadRefs = Array.mapMaybe (\(Tuple ref target) ->
-          case decodeRemoteMonitorTarget target of
-            Just remote | remote.node == disc.node -> Just (Tuple ref remote.pid)
+          case target of
+            MonitorRemote remote | remote.node == disc.node -> Just (Tuple ref remote.pid)
             _ -> Nothing
-        ) (Map.toUnfoldable p.monitors :: Array (Tuple String String))
+        ) (Map.toUnfoldable p.monitors :: Array (Tuple String MonitorTarget))
       in case Array.null deadRefs of
         true -> scheduler
         false ->

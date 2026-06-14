@@ -32,9 +32,6 @@ import FinVM.Vec as Vec
 import FinVM.Error (VMError(..), ErrorCode(..))
 import FinVM.Error as VMErrorCode
 
-remoteMonitorPrefix :: String
-remoteMonitorPrefix = "__remote__:"
-
 -- | Executes one instruction for a given process, updating the Machine and Process state.
 stepProcess :: Machine -> Process -> Either VMError (Tuple Machine Process)
 stepProcess m p = do
@@ -726,7 +723,7 @@ evalInstruction m p func inst =
         Nothing -> Left $ VMError ProcessNotFound ("Process " <> targetPid <> " not found")
         Just _ ->
           let ref = "mon" <> show m.counters.steps <> ":" <> targetPid
-          in pure $ Tuple m (writeReg (pNextPc { monitors = Map.insert ref targetPid p.monitors }) dst (VString ref))
+          in pure $ Tuple m (writeReg (pNextPc { monitors = Map.insert ref (ProcessTypes.MonitorLocal targetPid) p.monitors }) dst (VString ref))
       _ -> Left $ VMError TypeMismatch "PROC_MONITOR requires a ProcessRef"
 
   PROC_DEMONITOR refReg -> do
@@ -808,7 +805,6 @@ evalInstruction m p func inst =
           ref = "rmon" <> show m.counters.steps <> ":" <> r.pid
           node = case r.node of
             NodeRef n -> n
-          target = encodeRemoteMonitorTarget node r.pid
           intent =
             { type_: "RemoteMonitorIntent"
             , payload: VRecord (Map.fromFoldable
@@ -819,7 +815,7 @@ evalInstruction m p func inst =
                 ])
             }
           m' = m { outbox = List.Cons intent m.outbox }
-          p' = pNextPc { monitors = Map.insert ref target p.monitors }
+          p' = pNextPc { monitors = Map.insert ref (ProcessTypes.MonitorRemote { node, pid: r.pid }) p.monitors }
         in pure $ Tuple m' (writeReg p' dst (VString ref))
       _ -> Left $ VMError TypeMismatch "NODE_MONITOR requires a RemoteProcessRef"
 
@@ -830,8 +826,8 @@ evalInstruction m p func inst =
         let
           previousTarget = Map.lookup monitorRef p.monitors
           p' = pNextPc { monitors = Map.delete monitorRef p.monitors }
-        in case previousTarget >>= decodeRemoteMonitorTarget of
-          Just remote ->
+        in case previousTarget of
+          Just (ProcessTypes.MonitorRemote remote) ->
             let
               intent =
                 { type_: "RemoteDemonitorIntent"
@@ -845,6 +841,7 @@ evalInstruction m p func inst =
               m' = m { outbox = List.Cons intent m.outbox }
             in pure $ Tuple m' p'
           Nothing -> pure $ Tuple m p'
+          _ -> pure $ Tuple m p'
       _ -> Left $ VMError TypeMismatch "NODE_DEMONITOR requires a String monitor reference"
 
   NODE_OBSERVE_STATE dst nodeReg -> do
@@ -1020,21 +1017,6 @@ awaitKey = case _ of
     Just (VString k) -> Just k
     _ -> Nothing
   _ -> Nothing
-
-encodeRemoteMonitorTarget :: String -> String -> String
-encodeRemoteMonitorTarget node pid = remoteMonitorPrefix <> node <> ":" <> pid
-
-decodeRemoteMonitorTarget :: String -> Maybe { node :: String, pid :: String }
-decodeRemoteMonitorTarget target = do
-  rest <- String.stripPrefix (String.Pattern remoteMonitorPrefix) target
-  case String.lastIndexOf (String.Pattern ":") rest of
-    Nothing -> Nothing
-    Just idx ->
-      let
-        node = String.take idx rest
-        pid = String.drop (idx + 1) rest
-      in
-        if node == "" || pid == "" then Nothing else Just { node, pid }
 
 -- Helper to write a register.
 -- The Nothing branch is unreachable for validated programs: Validate ensures

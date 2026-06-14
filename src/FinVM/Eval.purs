@@ -3,7 +3,7 @@ module FinVM.Eval where
 import Prelude
 import FinVM.Error (VMError(..), ErrorCode(ProcessDeadlock, ProcessNotFound))
 import FinVM.Machine (Machine)
-import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..))
 import FinVM.Value (Value(..))
 import FinVM.Interpreter as Interpreter
 import FinVM.Process.Scheduler as Scheduler
@@ -75,6 +75,44 @@ runSliceForProcess m p remaining =
       res <- Interpreter.stepProcess m p
       case res of
         Tuple m' p' -> runSliceForProcess m' p' (remaining - 1)
+
+-- | Run until QUIESCENCE: stop when no process is runnable, WITHOUT erroring on a
+-- | deadlock. The caller classifies the result (processes parked on WaitingOnEffect
+-- | => suspended/pending; all done => completed; otherwise a genuine deadlock).
+-- | This is the entry the async effect driver uses (suspend/resume, not re-run).
+runUntilQuiescent :: Machine -> Either VMError Machine
+runUntilQuiescent machineInit0 = tailRecM runSlice machineInit
+  where
+    machineInit = machineInit0 { labelCache = Interpreter.buildLabelCache machineInit0.program }
+    runSlice m =
+      if m.counters.steps >= m.config.limits.maxSteps
+        then Right (Done m)
+        else
+          case Scheduler.nextProcess m.scheduler of
+            Nothing -> case wakeNextTick m of
+              Just m' -> Right (Loop m')
+              Nothing -> Right (Done m) -- quiescent: stop; caller classifies
+            Just (Tuple pid s') -> do
+              let m_current = m { scheduler = s' }
+              process <- case Scheduler.findProcess m_current.scheduler pid of
+                Nothing -> Left $ VMError ProcessNotFound ("Process " <> pid <> " not found")
+                Just p -> pure p
+              res <- runSliceForProcess m_current process m.config.limits.maxProcessStepsPerSlice
+              case res of
+                Tuple m_next p_next -> do
+                  let m_updated = case p_next.status of
+                        ProcessRunning ->
+                          m_next { scheduler = Scheduler.yieldProcess (Scheduler.updateProcess m_next.scheduler p_next) p_next.pid }
+                        ProcessReady ->
+                          m_next { scheduler = Scheduler.yieldProcess (Scheduler.updateProcess m_next.scheduler p_next) p_next.pid }
+                        ProcessWaiting _ ->
+                          m_next { scheduler = Scheduler.updateProcess m_next.scheduler p_next }
+                        ProcessCompleted val ->
+                          m_next { scheduler = Scheduler.updateProcess m_next.scheduler (p_next { result = Just val }) }
+                        _ -> m_next { scheduler = Scheduler.updateProcess m_next.scheduler p_next }
+                      m_woken = wakeProcessWaiters p_next.pid m_updated
+                      m_final = notifyMonitorsOfDeath p_next.pid p_next.status m_woken
+                  Right (Loop m_final)
 
 -- | Debug version of runMachine that logs the trace.
 debugRun :: Machine -> Effect Unit
@@ -174,7 +212,10 @@ notifyMonitorsOfDeath deadPid status m =
       observers = Map.values m.scheduler.processes
       handle scheduler q =
         let
-          deadRefs = Set.toUnfoldable (Map.keys (Map.filter (_ == deadPid) q.monitors)) :: Array String
+          deadRefs = Set.toUnfoldable (Map.keys (Map.filter matchesDeadPid q.monitors)) :: Array String
+          matchesDeadPid = case _ of
+            MonitorLocal pid -> pid == deadPid
+            _ -> false
         in
           case deadRefs of
             [] -> scheduler
@@ -183,7 +224,7 @@ notifyMonitorsOfDeath deadPid status m =
                 downs = map (\ref -> downMessage ref deadPid reason) deadRefs
                 q' = q
                   { mailbox = q.mailbox <> downs
-                  , monitors = Map.filter (_ /= deadPid) q.monitors
+                  , monitors = Map.filter (not <<< matchesDeadPid) q.monitors
                   , status = case q.status of
                       ProcessWaiting WaitingForMessage -> ProcessReady
                       ProcessWaiting (WaitingForMonitor _) -> ProcessReady

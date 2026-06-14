@@ -15,6 +15,9 @@ data WaitCondition
   | WaitingForTick Int
   | WaitingForRemoteNode NodeRef
   | WaitingForRemoteProcess RemoteProcessRef
+  -- Suspended on an async host effect (correlation key). The host fulfils the
+  -- effect and delivers the result to this process's mailbox, waking it.
+  | WaitingOnEffect String
 
 derive instance eqWaitCondition :: Eq WaitCondition
 derive instance ordWaitCondition :: Ord WaitCondition
@@ -39,6 +42,18 @@ data ProcessStatus
 derive instance eqProcessStatus :: Eq ProcessStatus
 derive instance ordProcessStatus :: Ord ProcessStatus
 
+data MonitorTarget
+  = MonitorLocal ProcessId
+  | MonitorRemote { node :: String, pid :: String }
+
+derive instance eqMonitorTarget :: Eq MonitorTarget
+derive instance ordMonitorTarget :: Ord MonitorTarget
+
+instance showMonitorTarget :: Show MonitorTarget where
+  show = case _ of
+    MonitorLocal pid -> "(MonitorLocal " <> pid <> ")"
+    MonitorRemote r -> "(MonitorRemote " <> r.node <> ":" <> r.pid <> ")"
+
 instance showWaitCondition :: Show WaitCondition where
   show = case _ of
     WaitingForMessage -> "WaitingForMessage"
@@ -47,6 +62,7 @@ instance showWaitCondition :: Show WaitCondition where
     WaitingForTick t -> "WaitingForTick " <> show t
     WaitingForRemoteNode ref -> "WaitingForRemoteNode " <> show ref
     WaitingForRemoteProcess ref -> "WaitingForRemoteProcess " <> ref.pid
+    WaitingOnEffect key -> "WaitingOnEffect " <> key
 
 instance showCancelReason :: Show CancelReason where
   show (CancelReason r) = "CancelReason " <> r
@@ -75,7 +91,7 @@ type Process =
   , callStack :: Array Frame
   , mailbox :: Array Message
   , links :: Set.Set ProcessId
-  , monitors :: Map.Map MonitorRef ProcessId
+  , monitors :: Map.Map MonitorRef MonitorTarget
   , parent :: Maybe ProcessId
   , children :: Set.Set ProcessId
   , trapExit :: Boolean

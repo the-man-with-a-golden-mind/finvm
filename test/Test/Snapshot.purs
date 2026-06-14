@@ -12,7 +12,7 @@ import Data.Tuple (Tuple(..))
 import FinVM.Encoding.Resume (encodeMachineState, decodeMachineState)
 import FinVM.Frame (FrameRef(..))
 import FinVM.Machine (Machine)
-import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..))
 import FinVM.Process.Scheduler (initialScheduler, spawnProcess)
 import FinVM.Value (Value(..))
 import FinVM.Vec as Vec
@@ -37,8 +37,8 @@ mkProc pid status regs mailbox =
   , mailbox
   , links: Set.fromFoldable [ "p9" ]
   , monitors: Map.fromFoldable
-      [ Tuple "mon0:p2" "p2"
-      , Tuple "rmon0:p42" "__remote__:nodeA:p42"
+      [ Tuple "mon0:p2" (MonitorLocal "p2")
+      , Tuple "rmon0:p42" (MonitorRemote { node: "nodeA", pid: "p42" })
       ]
   , parent: Just "main"
   , children: Set.empty
@@ -97,6 +97,6 @@ spec = do
             Just p -> p.mailbox `shouldEqual` [ VString "queued1", VString "queued2" ]
           case Map.lookup "p0" m2.scheduler.processes of
             Nothing -> fail "p0 missing after resume"
-            Just p -> Map.lookup "rmon0:p42" p.monitors `shouldEqual` Just "__remote__:nodeA:p42"
+            Just p -> Map.lookup "rmon0:p42" p.monitors `shouldEqual` Just (MonitorRemote { node: "nodeA", pid: "p42" })
           m2.scheduler.nextPidSequence `shouldEqual` machine.scheduler.nextPidSequence
           Map.lookup "counter" m2.state `shouldEqual` Just (VInt (BI.fromInt 3))

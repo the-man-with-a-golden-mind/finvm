@@ -11,7 +11,7 @@ import Data.Tuple (Tuple(..))
 import FinVM.Eval as Eval
 import FinVM.Value (Value(..))
 import FinVM.Machine (Machine)
-import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..))
 import FinVM.Process.Scheduler (initialScheduler, spawnProcess)
 import Test.Spec (Spec, describe, it)
 import Test.Spec.Assertions (shouldEqual, fail)
@@ -24,7 +24,7 @@ limits =
   , maxEffectsRequested: 10
   }
 
-mkProcess :: String -> ProcessStatus -> Map.Map String String -> Process
+mkProcess :: String -> ProcessStatus -> Map.Map String MonitorTarget -> Process
 mkProcess pid status monitors =
   { pid
   , status
@@ -52,7 +52,7 @@ spec = do
       -- waiting for a message. p1 has completed.
       target = mkProcess "p1" (ProcessCompleted (VInt (BI.fromInt 7))) Map.empty
       observer = mkProcess "p2" (ProcessWaiting WaitingForMessage)
-                   (Map.fromFoldable [ Tuple "mon0:p1" "p1" ])
+                   (Map.fromFoldable [ Tuple "mon0:p1" (MonitorLocal "p1") ])
       scheduler0 = spawnProcess (spawnProcess initialScheduler target) observer
       machine :: Machine
       machine =
