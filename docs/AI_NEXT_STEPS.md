@@ -15,6 +15,15 @@ what tests must pass before shipping each step.
   - Disconnect delivery injects deterministic `DOWN` messages.
 - Monitor bookkeeping now uses typed monitor targets internally
   (`MonitorLocal` / `MonitorRemote`) instead of string markers.
+- Node lifecycle deliveries can now update deterministic node metadata
+  (`NODE_STATUS`, `NODE_LAST_SEEN_TICK`, `NODE_LAST_STATE_HASH`).
+- `RemoteSpawnIntent` now carries requester metadata (`requesterPid`, `requestId`)
+  and host transport handlers can complete spawn via deterministic mailbox
+  deliveries.
+- Remote link baseline exists:
+  - `NODE_LINK` / `NODE_UNLINK` emit transport intents.
+  - disconnect delivery applies trap-exit-aware remote link behavior
+    (`EXIT` mailbox vs process exit).
 - Replay determinism and mailbox/snapshot behavior have dedicated tests.
 
 Do **not** redesign from scratch. Extend incrementally from this baseline.

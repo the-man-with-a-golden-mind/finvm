@@ -68,7 +68,7 @@ spec = do
       process :: Process
       process =
         { pid: "p1", status: ProcessReady, function: "noop", frame: { function: "noop", pc: 0, registers: Array.replicate 10 VUnit, returnRegister: Nothing, caller: Nothing }
-        , callStack: [], mailbox: [], links: mempty, monitors: Map.empty, parent: Nothing, children: mempty, trapExit: false, metadata: { name: "p1" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
+        , callStack: [], mailbox: [], links: mempty, remoteLinks: mempty, monitors: Map.empty, parent: Nothing, children: mempty, trapExit: false, metadata: { name: "p1" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
 
     it "creates and transitions a machine instance" do
       -- 1. Create instance: MACHINE_NEW dst machineId dataReg

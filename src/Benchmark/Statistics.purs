@@ -77,7 +77,7 @@ runBenchmark perfMode size = do
 
     initialProcess =
       { pid: "main", status: ProcessReady, function: "main", frame: { function: "main", pc: 0, registers: Array.replicate 10 VUnit, returnRegister: Nothing, caller: Nothing }
-      , callStack: [], mailbox: [], links: mempty, monitors: Map.empty, parent: Nothing, children: mempty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
+      , callStack: [], mailbox: [], links: mempty, remoteLinks: mempty, monitors: Map.empty, parent: Nothing, children: mempty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
     
     machine =
       { program: program, scheduler: spawnProcess initialScheduler initialProcess, state: Map.empty, input: Map.empty, config: { limits: limits, externalBuiltins: Map.empty, performanceMode: perfMode }

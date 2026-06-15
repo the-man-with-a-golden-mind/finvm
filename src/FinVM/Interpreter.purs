@@ -613,6 +613,7 @@ evalInstruction m p func inst =
           , callStack: []
           , mailbox: []
           , links: Set.empty
+          , remoteLinks: Set.empty
           , monitors: Map.empty
           , parent: Just p.pid
           , children: Set.empty
@@ -745,11 +746,13 @@ evalInstruction m p func inst =
   NODE_STATUS dst nodeReg -> do
     node <- readReg p nodeReg
     case node of
-      VString n -> pure $ Tuple m (writeReg pNextPc dst (VString (if n == "local" then "online" else "unknown")))
+      VString n ->
+        let status = if n == "local" then "online" else nodeStatusOf m n
+        in pure $ Tuple m (writeReg pNextPc dst (VString status))
       _ -> Left $ VMError TypeMismatch "NODE_STATUS requires a node String"
 
   NODE_KNOWN dst ->
-    pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray [ VString "local" ])))
+    pure $ Tuple m (writeReg pNextPc dst (VList (Vec.fromArray (map VString (knownNodes m)))))
 
   REMOTE_PID_NEW dst nodeReg pidReg -> do
     vNode <- readReg p nodeReg
@@ -791,11 +794,53 @@ evalInstruction m p func inst =
         _ <- case Map.lookup targetId m.program.functions of
           Nothing -> Left $ VMError UnknownFunction ("Unknown function: " <> targetId)
           Just f -> pure f
-        let remotePid = "remote:" <> nodeName <> ":" <> targetId <> ":" <> show m.counters.steps
-            intent = { type_: "RemoteSpawnIntent", payload: VRecord (Map.fromFoldable [ Tuple "node" (VString nodeName), Tuple "function" (VString targetId), Tuple "args" (VList (Vec.fromArray argVals)), Tuple "pid" (VString remotePid) ]) }
+        let
+            requestId = "spawn:" <> p.pid <> ":" <> show m.counters.steps
+            remotePid = "remote:" <> nodeName <> ":" <> targetId <> ":" <> show m.counters.steps
+            intent = { type_: "RemoteSpawnIntent", payload: VRecord (Map.fromFoldable [ Tuple "node" (VString nodeName), Tuple "function" (VString targetId), Tuple "args" (VList (Vec.fromArray argVals)), Tuple "pid" (VString remotePid), Tuple "requestId" (VString requestId), Tuple "requesterPid" (VString p.pid) ]) }
             m' = m { outbox = List.Cons intent m.outbox }
         pure $ Tuple m' (writeReg pNextPc dst (VRemoteProcessRef { node: NodeRef nodeName, pid: remotePid }))
       _ -> Left $ VMError TypeMismatch "NODE_SPAWN requires a node String"
+
+  NODE_LINK remotePidReg -> do
+    remotePid <- readReg p remotePidReg
+    case remotePid of
+      VRemoteProcessRef r ->
+        let
+          node = case r.node of
+            NodeRef n -> n
+          intent =
+            { type_: "RemoteLinkIntent"
+            , payload: VRecord (Map.fromFoldable
+                [ Tuple "pid" (VString p.pid)
+                , Tuple "node" (VString node)
+                , Tuple "remotePid" (VString r.pid)
+                ])
+            }
+          m' = m { outbox = List.Cons intent m.outbox }
+          p' = pNextPc { remoteLinks = Set.insert r p.remoteLinks }
+        in pure $ Tuple m' p'
+      _ -> Left $ VMError TypeMismatch "NODE_LINK requires a RemoteProcessRef"
+
+  NODE_UNLINK remotePidReg -> do
+    remotePid <- readReg p remotePidReg
+    case remotePid of
+      VRemoteProcessRef r ->
+        let
+          node = case r.node of
+            NodeRef n -> n
+          intent =
+            { type_: "RemoteUnlinkIntent"
+            , payload: VRecord (Map.fromFoldable
+                [ Tuple "pid" (VString p.pid)
+                , Tuple "node" (VString node)
+                , Tuple "remotePid" (VString r.pid)
+                ])
+            }
+          m' = m { outbox = List.Cons intent m.outbox }
+          p' = pNextPc { remoteLinks = Set.delete r p.remoteLinks }
+        in pure $ Tuple m' p'
+      _ -> Left $ VMError TypeMismatch "NODE_UNLINK requires a RemoteProcessRef"
 
   NODE_MONITOR dst remotePidReg -> do
     remotePid <- readReg p remotePidReg
@@ -854,14 +899,14 @@ evalInstruction m p func inst =
     node <- readReg p nodeReg
     case node of
       VString "local" -> pure $ Tuple m (writeReg pNextPc dst (VString (Snapshot.createSnapshot m)))
-      VString _ -> pure $ Tuple m (writeReg pNextPc dst (VOption Nothing))
+      VString n -> pure $ Tuple m (writeReg pNextPc dst (VOption (map VString (nodeLastStateHash m n))))
       _ -> Left $ VMError TypeMismatch "NODE_LAST_STATE_HASH requires a node String"
 
   NODE_LAST_SEEN_TICK dst nodeReg -> do
     node <- readReg p nodeReg
     case node of
       VString "local" -> pure $ Tuple m (writeReg pNextPc dst (VInt (BI.fromInt m.scheduler.logicalTick)))
-      VString _ -> pure $ Tuple m (writeReg pNextPc dst (VOption Nothing))
+      VString n -> pure $ Tuple m (writeReg pNextPc dst (VOption (map (VInt <<< BI.fromInt) (nodeLastSeenTick m n))))
       _ -> Left $ VMError TypeMismatch "NODE_LAST_SEEN_TICK requires a node String"
 
   NODE_QUERY_STATE dst nodeReg -> do
@@ -1018,6 +1063,41 @@ awaitKey = case _ of
     _ -> Nothing
   _ -> Nothing
 
+nodeStateKey :: String
+nodeStateKey = "__finvm.nodes"
+
+nodeTable :: Machine -> Map.Map String Value
+nodeTable m = case Map.lookup nodeStateKey m.state of
+  Just (VRecord entries) -> entries
+  _ -> Map.empty
+
+nodeMeta :: Machine -> String -> Maybe (Map.Map String Value)
+nodeMeta m node = case Map.lookup node (nodeTable m) of
+  Just (VRecord fields) -> Just fields
+  _ -> Nothing
+
+nodeStatusOf :: Machine -> String -> String
+nodeStatusOf m node = case nodeMeta m node >>= Map.lookup "status" of
+  Just (VString status) -> status
+  _ -> "unknown"
+
+nodeLastStateHash :: Machine -> String -> Maybe String
+nodeLastStateHash m node = case nodeMeta m node >>= Map.lookup "lastStateHash" of
+  Just (VString hash) -> Just hash
+  _ -> Nothing
+
+nodeLastSeenTick :: Machine -> String -> Maybe Int
+nodeLastSeenTick m node = case nodeMeta m node >>= Map.lookup "lastSeenTick" of
+  Just (VInt tick) -> BI.toInt tick
+  _ -> Nothing
+
+knownNodes :: Machine -> Array String
+knownNodes m =
+  let
+    remote = Set.toUnfoldable (Map.keys (nodeTable m)) :: Array String
+  in
+    Array.sort (Array.nub (Array.cons "local" remote))
+
 -- Helper to write a register.
 -- The Nothing branch is unreachable for validated programs: Validate ensures
 -- every destination register is in [0, registerCount) and registerCount >= arity,
@@ -1054,17 +1134,19 @@ type DbTable =
   { nextId :: Int
   , rows :: Map.Map String Value
   , indexes :: Map.Map String Value
+  , hashCache :: Maybe String
+  , dirtyHash :: Boolean
   }
 
 emptyDbTable :: DbTable
-emptyDbTable = { nextId: 0, rows: Map.empty, indexes: Map.empty }
+emptyDbTable = { nextId: 0, rows: Map.empty, indexes: Map.empty, hashCache: Nothing, dirtyHash: true }
 
 dbInsert :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
 dbInsert m args = case args of
   [VString table, record] -> do
     tableState <- readDbTable table m
     let id = "rec" <> show tableState.nextId
-        tableState' = tableState { nextId = tableState.nextId + 1, rows = Map.insert id record tableState.rows }
+        tableState' = tableState { nextId = tableState.nextId + 1, rows = Map.insert id record tableState.rows, hashCache = Nothing, dirtyHash = true }
     pure $ Tuple (writeDbTable table tableState' m) (VString id)
   _ -> Left $ VMError TypeMismatch "db.insert/v1 expects (Table:String, Record:Value)"
 
@@ -1081,7 +1163,10 @@ dbUpdate m args = case args of
     tableState <- readDbTable table m
     let existed = Map.member id tableState.rows
         rows' = if existed then Map.insert id record tableState.rows else tableState.rows
-    pure $ Tuple (writeDbTable table (tableState { rows = rows' }) m) (VBool existed)
+        tableState' = if existed
+          then tableState { rows = rows', hashCache = Nothing, dirtyHash = true }
+          else tableState
+    pure $ Tuple (writeDbTable table tableState' m) (VBool existed)
   _ -> Left $ VMError TypeMismatch "db.update/v1 expects (Table:String, ID:String, Record:Value)"
 
 dbDelete :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
@@ -1090,7 +1175,10 @@ dbDelete m args = case args of
     tableState <- readDbTable table m
     let existed = Map.member id tableState.rows
         rows' = Map.delete id tableState.rows
-    pure $ Tuple (writeDbTable table (tableState { rows = rows' }) m) (VBool existed)
+        tableState' = if existed
+          then tableState { rows = rows', hashCache = Nothing, dirtyHash = true }
+          else tableState
+    pure $ Tuple (writeDbTable table tableState' m) (VBool existed)
   _ -> Left $ VMError TypeMismatch "db.delete/v1 expects (Table:String, ID:String)"
 
 dbQuery :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
@@ -1113,7 +1201,14 @@ dbHash :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
 dbHash m args = case args of
   [VString table] -> do
     tableState <- readDbTable table m
-    pure $ Tuple m (VString (Canonical.hashValue (VRecord tableState.rows)))
+    let
+      computed = Canonical.hashValue (VRecord tableState.rows)
+      hashed = if tableState.dirtyHash then computed else fromMaybe computed tableState.hashCache
+      tableState' =
+        if tableState.dirtyHash
+          then tableState { hashCache = Just hashed, dirtyHash = false }
+          else tableState
+    pure $ Tuple (writeDbTable table tableState' m) (VString hashed)
   _ -> Left $ VMError TypeMismatch "db.hash/v1 expects (Table:String)"
 
 cacheSet :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
@@ -1157,18 +1252,31 @@ readDbTable table m = case Map.lookup table (readRecordState dbStateKey m) of
       Just (VRecord indexes) -> pure indexes
       Nothing -> pure Map.empty
       _ -> Left $ VMError TypeMismatch "Malformed db table: indexes must be Record"
-    pure { nextId, rows, indexes }
+    hashCache <- case Map.lookup "hashCache" fields of
+      Just (VString h) -> pure (Just h)
+      Nothing -> pure Nothing
+      _ -> Left $ VMError TypeMismatch "Malformed db table: hashCache must be String"
+    dirtyHash <- case Map.lookup "dirtyHash" fields of
+      Just (VBool b) -> pure b
+      Nothing -> pure true
+      _ -> Left $ VMError TypeMismatch "Malformed db table: dirtyHash must be Bool"
+    pure { nextId, rows, indexes, hashCache, dirtyHash }
   Just _ -> Left $ VMError TypeMismatch "Malformed db store: table must be Record"
 
 writeDbTable :: String -> DbTable -> Machine -> Machine
 writeDbTable table tableState m =
   let
     db = readRecordState dbStateKey m
-    tableValue = VRecord (Map.fromFoldable
+    baseFields = Map.fromFoldable
       [ Tuple "nextId" (VInt (BI.fromInt tableState.nextId))
       , Tuple "rows" (VRecord tableState.rows)
       , Tuple "indexes" (VRecord tableState.indexes)
-      ])
+      , Tuple "dirtyHash" (VBool tableState.dirtyHash)
+      ]
+    fields = case tableState.hashCache of
+      Just h -> Map.insert "hashCache" (VString h) baseFields
+      Nothing -> Map.delete "hashCache" baseFields
+    tableValue = VRecord fields
   in m { state = Map.insert dbStateKey (VRecord (Map.insert table tableValue db)) m.state }
 
 readCacheNamespace :: String -> Machine -> Map.Map String Value
@@ -1240,6 +1348,7 @@ runFunctionValue m callerPid functionId args = do
       , callStack: []
       , mailbox: []
       , links: Set.empty
+      , remoteLinks: Set.empty
       , monitors: Map.empty
       , parent: Just callerPid
       , children: Set.empty

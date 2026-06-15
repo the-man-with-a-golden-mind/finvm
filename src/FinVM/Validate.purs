@@ -209,6 +209,8 @@ extractRegisters = case _ of
   REMOTE_PID_LOCAL r1 r2 -> [r1, r2]
   NODE_SEND r1 r2 -> [r1, r2]
   NODE_SPAWN r1 r2 _ args -> Array.cons r1 (Array.cons r2 args)
+  NODE_LINK r -> [r]
+  NODE_UNLINK r -> [r]
   NODE_MONITOR r1 r2 -> [r1, r2]
   NODE_DEMONITOR r -> [r]
   NODE_OBSERVE_STATE r1 r2 -> [r1, r2]

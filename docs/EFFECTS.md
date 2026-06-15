@@ -58,6 +58,8 @@ The host now uses the snapshot/resume API, not whole-program re-run:
    - effect reply: `{ pid, key, result }`
    - mailbox message: `{ pid, message }`
    - disconnect signal: `{ disconnect: { node, reason? } }`
+   - node lifecycle update:
+     `{ nodeStatus: { node, status, reason?, lastSeenTick?, lastStateHash? } }`
 4. `runEffectResume(program, snapshot, deliveries)` continues from the exact
    machine state and runs again to quiescence.
 5. Repeat until `status == "completed"` (or classify deadlock/error).
@@ -68,12 +70,15 @@ can continue running and mutating state before quiescence.
 ### Remote monitor intents and disconnect delivery
 - `NODE_MONITOR` emits `RemoteMonitorIntent` and stores a monitor ref in-process.
 - `NODE_DEMONITOR` removes that ref and emits `RemoteDemonitorIntent`.
+- `NODE_LINK` emits `RemoteLinkIntent`; `NODE_UNLINK` emits `RemoteUnlinkIntent`.
 - The host can notify a transport/node break with a resume delivery:
   `{ "disconnect": { "node": "<nodeName>", "reason": "<optional>" } }`.
 - On resume, every process monitoring remote refs on that node receives a mailbox
   `DOWN` message (`{ tag: "DOWN", payload: { ref, pid, reason } }` in VM Value
   form), those monitor refs are removed, and waiters blocked on mailbox/monitor are
   woken deterministically.
+- For remote links on that node: trap-exit processes receive mailbox
+  `EXIT` messages; non-trapping processes exit with the disconnect reason.
 - If `reason` is omitted, VM defaults to `"noconnection"`.
 
 ## 4. Concurrency + determinism
@@ -85,6 +90,13 @@ perform them **concurrently** (`Promise.all`), but it must:
 
 Handlers may finish out-of-order; replay remains deterministic because resume and
 journal ordering are stable.
+
+For transport intents (`kind: "transport"`), handlers can return delivery hints:
+- `{ delivery: <envelope> }` or `{ deliveries: [<envelope>, ...] }`
+- envelopes use the same resume-delivery shapes above (`message`, `disconnect`,
+  `nodeStatus`, and effect replies when needed).
+- live mode converts these hints into resume deliveries; replay reconstructs the
+  same deliveries from journaled transport results.
 
 ## 5. Journal (record / replay)
 The journal is a serializable array, in request order:

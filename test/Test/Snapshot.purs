@@ -36,6 +36,7 @@ mkProc pid status regs mailbox =
   , callStack: [ { function: "main", pc: 0, registers: [ VUnit ], returnRegister: Nothing, caller: Nothing } ]
   , mailbox
   , links: Set.fromFoldable [ "p9" ]
+  , remoteLinks: Set.empty
   , monitors: Map.fromFoldable
       [ Tuple "mon0:p2" (MonitorLocal "p2")
       , Tuple "rmon0:p42" (MonitorRemote { node: "nodeA", pid: "p42" })

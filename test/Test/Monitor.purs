@@ -33,6 +33,7 @@ mkProcess pid status monitors =
   , callStack: []
   , mailbox: []
   , links: Set.empty
+  , remoteLinks: Set.empty
   , monitors
   , parent: Nothing
   , children: Set.empty

@@ -106,13 +106,17 @@ the host interprets them.
 
 **Distribution (intents/metadata only — transport is a host concern):**
 `NODE_SELF`, `NODE_STATUS`, `NODE_KNOWN`, `REMOTE_PID_*`, `NODE_SEND`,
-`NODE_SPAWN`, `NODE_MONITOR`, `NODE_DEMONITOR`, `NODE_OBSERVE_STATE`,
+`NODE_SPAWN`, `NODE_LINK`, `NODE_UNLINK`, `NODE_MONITOR`, `NODE_DEMONITOR`, `NODE_OBSERVE_STATE`,
 `NODE_LAST_STATE_HASH`, `NODE_LAST_SEEN_TICK`, `NODE_QUERY_STATE`.
 
 `NODE_MONITOR` emits `RemoteMonitorIntent` and records a monitor ref in the
 process; `NODE_DEMONITOR` removes that ref and emits `RemoteDemonitorIntent`.
+`NODE_LINK`/`NODE_UNLINK` emit `RemoteLinkIntent`/`RemoteUnlinkIntent` and
+track remote links in process state.
 Hosts may inject `{ disconnect: { node, reason? } }` deliveries on resume, which
-produce `DOWN` mailbox messages for matching remote monitor refs.
+produce `DOWN` mailbox messages for matching remote monitor refs, and apply
+remote-link semantics: linked processes either receive `EXIT` mailbox messages
+(`trapExit = true`) or exit (`trapExit = false`).
 
 **State machines:** `MACHINE_NEW dst defId initReg`, `MACHINE_STATE dst inst`,
 `MACHINE_TRANSITION dst inst event`.

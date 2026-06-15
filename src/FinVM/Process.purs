@@ -91,6 +91,7 @@ type Process =
   , callStack :: Array Frame
   , mailbox :: Array Message
   , links :: Set.Set ProcessId
+  , remoteLinks :: Set.Set RemoteProcessRef
   , monitors :: Map.Map MonitorRef MonitorTarget
   , parent :: Maybe ProcessId
   , children :: Set.Set ProcessId

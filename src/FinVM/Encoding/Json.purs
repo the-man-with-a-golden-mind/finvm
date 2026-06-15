@@ -23,6 +23,7 @@ import Data.List as List
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Set as Set
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import FinVM.Error (VMError(..))
@@ -34,7 +35,7 @@ import FinVM.Instruction as I
 import FinVM.Limits (EvalLimits)
 import FinVM.Machine (Machine)
 import FinVM.Numeric.Rounding (Rounding(..))
-import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..))
+import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), MonitorTarget(..), ExitReason(..))
 import FinVM.Process.Scheduler as Scheduler
 import FinVM.Encoding.Resume (encodeMachineState, decodeMachineState)
 import FinVM.Program (Program)
@@ -42,7 +43,7 @@ import FinVM.Validate as Validate
 import FinVM.Registers (emptyRegisters)
 import FinVM.State (VMInput, VMState)
 import FinVM.Type (VMType(..))
-import FinVM.Value (Value(..))
+import FinVM.Value (Value(..), RemoteProcessRef, NodeRef(..))
 import FinVM.Vec as Vec
 import Foreign.Object (Object)
 import Foreign.Object as Object
@@ -63,6 +64,7 @@ data ResumeDelivery
   = DeliveryEffectReply { pid :: String, key :: String, result :: Value }
   | DeliveryMailboxMessage { pid :: String, message :: Value }
   | DeliveryDisconnect { node :: String, reason :: String }
+  | DeliveryNodeStatus { node :: String, status :: String, reason :: Maybe String, lastSeenTick :: Maybe Int, lastStateHash :: Maybe String }
 
 decodeProgramFile :: String -> Either String JsonProgramFile
 decodeProgramFile source = do
@@ -356,32 +358,42 @@ decodeDeliveries s =
 decodeDelivery :: Json.Json -> Either String ResumeDelivery
 decodeDelivery j = do
   o <- asObject "delivery" j
-  case Object.lookup "disconnect" o of
-    Just d -> do
-      dobj <- asObject "disconnect" d
-      node <- requiredString "node" dobj
-      reason <- case Object.lookup "reason" dobj of
-        Just r -> asString "disconnect.reason" r
-        Nothing -> pure "noconnection"
-      pure (DeliveryDisconnect { node, reason })
-    Nothing -> do
-      pid <- requiredString "pid" o
-      case Object.lookup "message" o, Object.lookup "key" o of
-        Just msg, _ -> do
-          message <- decodeValue msg
-          pure (DeliveryMailboxMessage { pid, message })
-        _, Just keyJ -> do
-          key <- asString "key" keyJ
-          result <- case Object.lookup "result" o of
-            Just r -> decodeValue r
-            Nothing -> pure VUnit
-          pure (DeliveryEffectReply { pid, key, result })
-        _, _ -> Left "delivery must contain either {pid,message}, {pid,key[,result]}, or {disconnect:{node[,reason]}}"
+  case Object.lookup "nodeStatus" o of
+    Just ns -> do
+      nobj <- asObject "nodeStatus" ns
+      node <- requiredString "node" nobj
+      status <- requiredString "status" nobj
+      reason <- optionalString "reason" nobj
+      lastSeenTick <- optionalInt "lastSeenTick" nobj
+      lastStateHash <- optionalString "lastStateHash" nobj
+      pure (DeliveryNodeStatus { node, status, reason, lastSeenTick, lastStateHash })
+    Nothing -> case Object.lookup "disconnect" o of
+      Just d -> do
+        dobj <- asObject "disconnect" d
+        node <- requiredString "node" dobj
+        reason <- case Object.lookup "reason" dobj of
+          Just r -> asString "disconnect.reason" r
+          Nothing -> pure "noconnection"
+        pure (DeliveryDisconnect { node, reason })
+      Nothing -> do
+        pid <- requiredString "pid" o
+        case Object.lookup "message" o, Object.lookup "key" o of
+          Just msg, _ -> do
+            message <- decodeValue msg
+            pure (DeliveryMailboxMessage { pid, message })
+          _, Just keyJ -> do
+            key <- asString "key" keyJ
+            result <- case Object.lookup "result" o of
+              Just r -> decodeValue r
+              Nothing -> pure VUnit
+            pure (DeliveryEffectReply { pid, key, result })
+          _, _ -> Left "delivery must contain either {pid,message}, {pid,key[,result]}, {disconnect:{node[,reason]}}, or {nodeStatus:{node,status[,reason,lastSeenTick,lastStateHash]}}"
 
 -- Deliver an effect result to a process: append an EffectReply message to its
 -- mailbox and wake it if it was parked on this effect's key.
 applyDelivery :: Machine -> ResumeDelivery -> Machine
 applyDelivery m d = case d of
+  DeliveryNodeStatus payload -> applyNodeStatusDelivery m payload
   DeliveryDisconnect disc -> applyDisconnectDelivery m disc
   DeliveryMailboxMessage payload -> case Scheduler.findProcess m.scheduler payload.pid of
     Nothing -> m
@@ -421,6 +433,13 @@ downMessage ref pid reason =
     , Tuple "reason" (VString reason)
     ]))
 
+exitMessage :: String -> String -> Value
+exitMessage pid reason =
+  VVariant "EXIT" (VRecord (Map.fromFoldable
+    [ Tuple "pid" (VString pid)
+    , Tuple "reason" (VString reason)
+    ]))
+
 applyDisconnectDelivery :: Machine -> { node :: String, reason :: String } -> Machine
 applyDisconnectDelivery m disc =
   let
@@ -432,24 +451,98 @@ applyDisconnectDelivery m disc =
             MonitorRemote remote | remote.node == disc.node -> Just (Tuple ref remote.pid)
             _ -> Nothing
         ) (Map.toUnfoldable p.monitors :: Array (Tuple String MonitorTarget))
+        deadRemoteLinks = Array.filter (\r -> case r.node of
+          NodeRef node -> node == disc.node
+        ) (Set.toUnfoldable p.remoteLinks :: Array RemoteProcessRef)
       in case Array.null deadRefs of
-        true -> scheduler
+        true -> case Array.null deadRemoteLinks of
+          true -> scheduler
+          false ->
+            let
+              keptLinks = Set.filter (\r -> case r.node of
+                NodeRef node -> node /= disc.node
+              ) p.remoteLinks
+            in if p.trapExit then
+              let
+                exits = map (\r -> exitMessage (case r.node of NodeRef n -> n <> ":" <> r.pid) disc.reason) deadRemoteLinks
+                wakesMailbox = case p.status of
+                  ProcessWaiting WaitingForMessage -> true
+                  _ -> false
+                p' = p
+                  { mailbox = p.mailbox <> exits
+                  , remoteLinks = keptLinks
+                  , status = if wakesMailbox then ProcessReady else p.status
+                  }
+                s1 = Scheduler.updateProcess scheduler p'
+              in if wakesMailbox then Scheduler.yieldProcess s1 p.pid else s1
+            else
+              Scheduler.updateProcess scheduler (p { remoteLinks = keptLinks, status = ProcessExited (ExitReason disc.reason) })
         false ->
           let
             downs = map (\(Tuple ref remotePid) -> downMessage ref remotePid disc.reason) deadRefs
             dropped = Array.foldl (\acc (Tuple ref _) -> Map.delete ref acc) p.monitors deadRefs
+            keptLinks = Set.filter (\r -> case r.node of
+              NodeRef node -> node /= disc.node
+            ) p.remoteLinks
+            exits = map (\r -> exitMessage (case r.node of NodeRef n -> n <> ":" <> r.pid) disc.reason) deadRemoteLinks
             wakesMailbox = case p.status of
               ProcessWaiting WaitingForMessage -> true
               ProcessWaiting (WaitingForMonitor _) -> true
               _ -> false
             p' = p
-              { mailbox = p.mailbox <> downs
+              { mailbox = p.mailbox <> downs <> (if p.trapExit then exits else [])
               , monitors = dropped
-              , status = if wakesMailbox then ProcessReady else p.status
+              , remoteLinks = keptLinks
+              , status = if Array.null deadRemoteLinks || p.trapExit
+                  then if wakesMailbox then ProcessReady else p.status
+                  else ProcessExited (ExitReason disc.reason)
               }
             s1 = Scheduler.updateProcess scheduler p'
           in if wakesMailbox then Scheduler.yieldProcess s1 p.pid else s1
-  in m { scheduler = Array.foldl step m.scheduler (Array.fromFoldable processes) }
+  in upsertNodeStatus (m { scheduler = Array.foldl step m.scheduler (Array.fromFoldable processes) })
+       { node: disc.node
+       , status: "offline"
+       , reason: Just disc.reason
+       , lastSeenTick: Just m.scheduler.logicalTick
+       , lastStateHash: Nothing
+       }
+
+nodeStateKey :: String
+nodeStateKey = "__finvm.nodes"
+
+allowedNodeStatus :: Array String
+allowedNodeStatus = [ "online", "suspect", "offline", "unknown" ]
+
+normalizeNodeStatus :: String -> String
+normalizeNodeStatus status =
+  if Array.elem status allowedNodeStatus then status else "unknown"
+
+upsertNodeStatus :: Machine -> { node :: String, status :: String, reason :: Maybe String, lastSeenTick :: Maybe Int, lastStateHash :: Maybe String } -> Machine
+upsertNodeStatus m payload =
+  let
+    nodes = case Map.lookup nodeStateKey m.state of
+      Just (VRecord entries) -> entries
+      _ -> Map.empty
+    previous = case Map.lookup payload.node nodes of
+      Just (VRecord entry) -> entry
+      _ -> Map.empty
+    withReason = case payload.reason of
+      Just reason -> Map.insert "reason" (VString reason) previous
+      Nothing -> previous
+    withTick = case payload.lastSeenTick of
+      Just tick -> Map.insert "lastSeenTick" (VInt (BigInt.fromInt tick)) withReason
+      Nothing -> withReason
+    withHash = case payload.lastStateHash of
+      Just hash -> Map.insert "lastStateHash" (VString hash) withTick
+      Nothing -> withTick
+    updated = Map.insert "status" (VString (normalizeNodeStatus payload.status)) withHash
+    nodes' = Map.insert payload.node (VRecord updated) nodes
+  in
+    m { state = Map.insert nodeStateKey (VRecord nodes') m.state }
+
+applyNodeStatusDelivery :: Machine -> { node :: String, status :: String, reason :: Maybe String, lastSeenTick :: Maybe Int, lastStateHash :: Maybe String } -> Machine
+applyNodeStatusDelivery m payload =
+  upsertNodeStatus m payload
 
 mkMainFunction :: Int -> Array Instruction -> VMFunction.Function
 mkMainFunction registerCount instructions =
@@ -498,6 +591,7 @@ initialMachine file =
       , callStack: []
       , mailbox: []
       , links: mempty
+      , remoteLinks: mempty
       , monitors: Map.empty
       , parent: Nothing
       , children: mempty
@@ -638,6 +732,8 @@ decodeInstruction json = do
     "REMOTE_PID_LOCAL" -> I.REMOTE_PID_LOCAL <$> intAt 1 parts <*> intAt 2 parts
     "NODE_SEND" -> I.NODE_SEND <$> intAt 1 parts <*> intAt 2 parts
     "NODE_SPAWN" -> I.NODE_SPAWN <$> intAt 1 parts <*> intAt 2 parts <*> stringAt 3 parts <*> intArrayAt 4 parts
+    "NODE_LINK" -> I.NODE_LINK <$> intAt 1 parts
+    "NODE_UNLINK" -> I.NODE_UNLINK <$> intAt 1 parts
     "NODE_MONITOR" -> I.NODE_MONITOR <$> intAt 1 parts <*> intAt 2 parts
     "NODE_DEMONITOR" -> I.NODE_DEMONITOR <$> intAt 1 parts
     "NODE_OBSERVE_STATE" -> I.NODE_OBSERVE_STATE <$> intAt 1 parts <*> intAt 2 parts
@@ -863,6 +959,11 @@ optionalStringWithDefault :: String -> String -> Object Json.Json -> Either Stri
 optionalStringWithDefault key fallback object = case Object.lookup key object of
   Nothing -> pure fallback
   Just value -> asString key value
+
+optionalString :: String -> Object Json.Json -> Either String (Maybe String)
+optionalString key object = case Object.lookup key object of
+  Nothing -> pure Nothing
+  Just value -> Just <$> asString key value
 
 optionalInt :: String -> Object Json.Json -> Either String (Maybe Int)
 optionalInt key object = case Object.lookup key object of

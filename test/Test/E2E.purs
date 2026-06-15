@@ -85,7 +85,7 @@ spec = do
 
       initialProcess =
         { pid: "main", status: ProcessReady, function: "main", frame: { function: "main", pc: 0, registers: Array.replicate 10 VUnit, returnRegister: Nothing, caller: Nothing }
-        , callStack: [], mailbox: [], links: Set.empty, monitors: Map.empty, parent: Nothing, children: Set.empty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
+        , callStack: [], mailbox: [], links: Set.empty, remoteLinks: Set.empty, monitors: Map.empty, parent: Nothing, children: Set.empty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
       
       machine =
         { program: program, scheduler: spawnProcess initialScheduler initialProcess, state: Map.empty, input: Map.empty, config: { limits: limits, externalBuiltins: Map.empty, performanceMode: false }

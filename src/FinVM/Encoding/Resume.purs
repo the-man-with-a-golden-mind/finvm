@@ -32,7 +32,7 @@ import FinVM.Error as E
 import FinVM.Frame (FrameRef(..), Frame)
 import FinVM.Machine (Machine)
 import FinVM.Process (Process, ProcessStatus(..), WaitCondition(..), CancelReason(..), ExitReason(..), MonitorTarget(..))
-import FinVM.Value (Value(..), NodeRef(..))
+import FinVM.Value (Value(..), NodeRef(..), RemoteProcessRef)
 import FinVM.Vec as Vec
 
 -- ---- small helpers ------------------------------------------------------
@@ -162,6 +162,19 @@ decMonitorTarget j = do
           pid <- strField "pid" o
           pure (MonitorRemote { node, pid })
         _ -> Left ("unknown monitor target kind: " <> k)
+
+encRemoteLink :: RemoteProcessRef -> J.Json
+encRemoteLink r = obj
+  [ Tuple "node" (J.fromString (case r.node of NodeRef n -> n))
+  , Tuple "pid" (J.fromString r.pid)
+  ]
+
+decRemoteLink :: J.Json -> Either String RemoteProcessRef
+decRemoteLink j = do
+  o <- asObj j
+  node <- strField "node" o
+  pid <- strField "pid" o
+  pure { node: NodeRef node, pid }
 
 decFixedV :: Object.Object J.Json -> Either String Value
 decFixedV o = do
@@ -374,6 +387,7 @@ encProc p = obj
   , Tuple "callStack" (J.fromArray (encFrame <$> p.callStack))
   , Tuple "mailbox" (J.fromArray (encVal <$> p.mailbox))
   , Tuple "links" (J.fromArray (J.fromString <$> (Set.toUnfoldable p.links :: Array String)))
+  , Tuple "remoteLinks" (J.fromArray (encRemoteLink <$> (Set.toUnfoldable p.remoteLinks :: Array RemoteProcessRef)))
   , Tuple "monitors" (J.fromArray ((\(Tuple k v) -> obj [ Tuple "k" (J.fromString k), Tuple "v" (encMonitorTarget v) ]) <$> (Map.toUnfoldable p.monitors :: Array (Tuple String MonitorTarget))))
   , Tuple "parent" (maybeJ J.fromString p.parent)
   , Tuple "children" (J.fromArray (J.fromString <$> (Set.toUnfoldable p.children :: Array String)))
@@ -395,6 +409,9 @@ decProc j = do
   callStack <- field "callStack" o >>= asArr >>= traverse decFrame
   mailbox <- field "mailbox" o >>= asArr >>= traverse decVal
   links <- field "links" o >>= asArr >>= traverse asStr
+  remoteLinks <- case Object.lookup "remoteLinks" o of
+    Just rl -> asArr rl >>= traverse decRemoteLink
+    Nothing -> pure []
   monitors <- field "monitors" o >>= asArr >>= traverse decMonitorKV
   parent <- decMaybe asStr (Object.lookup "parent" o)
   children <- field "children" o >>= asArr >>= traverse asStr
@@ -407,6 +424,7 @@ decProc j = do
   pure
     { pid, status, function: fn, frame, callStack, mailbox
     , links: Set.fromFoldable links
+    , remoteLinks: Set.fromFoldable remoteLinks
     , monitors: Map.fromFoldable monitors
     , parent, children: Set.fromFoldable children
     , trapExit, metadata: { name }, result, error: err

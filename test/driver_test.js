@@ -236,6 +236,137 @@ async function main() {
   assert.strictEqual(mResume.status, "completed", "disconnect wakes monitor with DOWN");
   assert.deepStrictEqual(mResume.result, { string: "net-split" }, "disconnect reason propagates via DOWN payload");
 
+  // --- 8. Node lifecycle delivery drives NODE_STATUS/NODE_LAST_* deterministically ---
+  console.log("8. node lifecycle status delivery");
+  const nodeStatusProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 8,
+    constants: [{ string: "vmB" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["PROC_RECEIVE", 0],
+      ["NODE_STATUS", 2, 1],
+      ["NODE_LAST_SEEN_TICK", 3, 1],
+      ["NODE_LAST_STATE_HASH", 4, 1],
+      ["RECORD_NEW", 5],
+      ["RECORD_SET", 5, 5, "status", 2],
+      ["RECORD_SET", 5, 5, "tick", 3],
+      ["RECORD_SET", 5, 5, "hash", 4],
+      ["RETURN", 5],
+    ],
+  });
+  const nsStart = JSON.parse(runEffectStart(nodeStatusProgram)(""));
+  assert.strictEqual(nsStart.status, "deadlock", "status program parks on mailbox receive");
+  const nsDeliveries = JSON.stringify([
+    { nodeStatus: { node: "vmB", status: "suspect", reason: "timeout", lastSeenTick: 7, lastStateHash: "h_vmB_1" } },
+    { pid: "main", message: { string: "wake" } },
+  ]);
+  const nsResume = JSON.parse(runEffectResume(nodeStatusProgram)(JSON.stringify(nsStart.snapshot))(nsDeliveries));
+  assert.strictEqual(nsResume.status, "completed", "node status delivery persists metadata and resume completes");
+  assert.deepStrictEqual(
+    nsResume.result,
+    { record: {
+      status: { string: "suspect" },
+      tick: { option: { int: "7" } },
+      hash: { option: { string: "h_vmB_1" } },
+    } },
+    "NODE_STATUS/NODE_LAST_* read host-delivered lifecycle metadata"
+  );
+
+  // --- 9. NODE_SPAWN completion through transport delivery contract ---
+  console.log("9. remote spawn ack/fail completion delivery");
+  const spawnProgram = JSON.stringify({
+    version: "1.0",
+    functions: {
+      main: {
+        registerCount: 6,
+        instructions: [
+          ["LOAD_CONST", 1, 0],
+          ["NODE_SPAWN", 0, 1, "worker", []],
+          ["PROC_RECEIVE", 2],
+          ["VARIANT_TAG", 3, 2],
+          ["RETURN", 3],
+        ],
+      },
+      worker: {
+        registerCount: 1,
+        instructions: [
+          ["HALT", 0],
+        ],
+      },
+    },
+    entrypoint: "main",
+    constants: [{ string: "vmB" }],
+  });
+  const spawnOk = await runLive(spawnProgram, {
+    handlers: {
+      RemoteSpawnIntent: async (p) => ({
+        deliveries: [
+          { pid: p.requesterPid, message: { tag: "RemoteSpawnAck", payload: { requestId: p.requestId, pid: p.pid } } },
+        ],
+      }),
+    },
+  });
+  assert.strictEqual(spawnOk.value, "RemoteSpawnAck", "NODE_SPAWN success is delivered as deterministic mailbox ack");
+  assert.strictEqual(spawnOk.journal[0].type_, "RemoteSpawnIntent");
+  const spawnFail = await runLive(spawnProgram, {
+    handlers: {
+      RemoteSpawnIntent: async (p) => ({
+        deliveries: [
+          { nodeStatus: { node: p.node, status: "offline", reason: "unreachable" } },
+          { pid: p.requesterPid, message: { tag: "RemoteSpawnFailed", payload: { reason: "unreachable", requestId: p.requestId } } },
+        ],
+      }),
+    },
+  });
+  assert.strictEqual(spawnFail.value, "RemoteSpawnFailed", "NODE_SPAWN failure is deterministic and replayable");
+
+  // --- 10. Remote link disconnect obeys trap-exit semantics ---
+  console.log("10. remote link disconnect semantics");
+  const linkedProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 7,
+    constants: [{ string: "vmB" }, { string: "remote-1" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["PROC_TRAP_EXIT", true],
+      ["NODE_LINK", 0],
+      ["PROC_RECEIVE", 3],
+      ["VARIANT_TAG", 4, 3],
+      ["RETURN", 4],
+    ],
+  });
+  const linkedStart = JSON.parse(runEffectStart(linkedProgram)(""));
+  assert.strictEqual(linkedStart.status, "suspended", "linked process should suspend with transport pending");
+  assert.strictEqual(linkedStart.pending[0].type_, "RemoteLinkIntent");
+  const linkedResume = JSON.parse(
+    runEffectResume(linkedProgram)(JSON.stringify(linkedStart.snapshot))(JSON.stringify([{ disconnect: { node: "vmB", reason: "noconnection" } }]))
+  );
+  assert.strictEqual(linkedResume.status, "completed");
+  assert.deepStrictEqual(linkedResume.result, { string: "EXIT" }, "trap-exit process receives EXIT message on remote disconnect");
+
+  const linkedNoTrapProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 6,
+    constants: [{ string: "vmB" }, { string: "remote-1" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["NODE_LINK", 0],
+      ["PROC_RECEIVE", 3],
+      ["RETURN", 3],
+    ],
+  });
+  const linkedNoTrapStart = JSON.parse(runEffectStart(linkedNoTrapProgram)(""));
+  const linkedNoTrapResume = JSON.parse(
+    runEffectResume(linkedNoTrapProgram)(JSON.stringify(linkedNoTrapStart.snapshot))(JSON.stringify([{ disconnect: { node: "vmB", reason: "noconnection" } }]))
+  );
+  assert.strictEqual(linkedNoTrapResume.status, "completed", "non-trap linked process exits on disconnect");
+  assert.strictEqual(linkedNoTrapResume.result, null, "exited process has no return value");
+
   console.log("All effect driver tests passed. 🚀");
 }
 

@@ -103,6 +103,55 @@ function parseVmOutput(raw) {
   return out;
 }
 
+function normalizeDeliveryCandidate(candidate) {
+  if (!candidate || typeof candidate !== "object") return null;
+  if (candidate.disconnect && typeof candidate.disconnect === "object") {
+    const node = candidate.disconnect.node;
+    if (typeof node !== "string" || node.length === 0) {
+      throw new Error("invalid transport delivery: disconnect.node is required");
+    }
+    return {
+      disconnect: {
+        node,
+        ...(typeof candidate.disconnect.reason === "string" ? { reason: candidate.disconnect.reason } : {}),
+      },
+    };
+  }
+  if (candidate.nodeStatus && typeof candidate.nodeStatus === "object") {
+    const ns = candidate.nodeStatus;
+    if (typeof ns.node !== "string" || ns.node.length === 0 || typeof ns.status !== "string" || ns.status.length === 0) {
+      throw new Error("invalid transport delivery: nodeStatus requires node and status");
+    }
+    const out = { nodeStatus: { node: ns.node, status: ns.status } };
+    if (typeof ns.reason === "string") out.nodeStatus.reason = ns.reason;
+    if (Number.isInteger(ns.lastSeenTick)) out.nodeStatus.lastSeenTick = ns.lastSeenTick;
+    if (typeof ns.lastStateHash === "string") out.nodeStatus.lastStateHash = ns.lastStateHash;
+    return out;
+  }
+  if (typeof candidate.pid === "string" && candidate.pid.length > 0) {
+    if ("message" in candidate) {
+      return { pid: candidate.pid, message: jsToValue(candidate.message) };
+    }
+    if ("key" in candidate && typeof candidate.key === "string" && candidate.key.length > 0) {
+      return { pid: candidate.pid, key: candidate.key, result: jsToValue(candidate.result) };
+    }
+  }
+  return null;
+}
+
+function transportDeliveriesFromResult(resultJs) {
+  if (!resultJs || typeof resultJs !== "object") return [];
+  const candidates = Array.isArray(resultJs.deliveries)
+    ? resultJs.deliveries
+    : ("delivery" in resultJs ? [resultJs.delivery] : []);
+  const normalized = [];
+  for (const candidate of candidates) {
+    const delivery = normalizeDeliveryCandidate(candidate);
+    if (delivery) normalized.push(delivery);
+  }
+  return normalized;
+}
+
 function start(programSource, inputAccum, stateAccum) {
   // runEffectStart is curried: runEffectStart(program)(overridesJson)
   const raw = runEffectStart(programSource)(JSON.stringify({ input: inputAccum, state: stateAccum }));
@@ -161,9 +210,13 @@ export async function runLive(programSource, { handlers = {}, input = {}, state 
     const deliveries = [];
     for (let k = 0; k < pending.length; k++) {
       const p = pending[k];
-      const rv = jsToValue(results[k]);
+      const resultJs = results[k];
+      const rv = jsToValue(resultJs);
       if (p.kind === "await_reply") {
         deliveries.push({ pid: p.pid, key: p.key, result: rv });
+      }
+      if (p.kind === "transport") {
+        deliveries.push(...transportDeliveriesFromResult(resultJs));
       }
       jrnl.push({ kind: p.kind, pid: p.pid, key: p.key, type_: p.type_, payload: p.payload, result: rv });
     }
@@ -215,6 +268,9 @@ export function runReplay(programSource, journal, { input = {}, state = {} } = {
       }
       if (p.kind === "await_reply") {
         deliveries.push({ pid: p.pid, key: p.key, result: entry.result }); // already tagless Value
+      }
+      if (p.kind === "transport") {
+        deliveries.push(...transportDeliveriesFromResult(valueToJs(entry.result)));
       }
     }
 

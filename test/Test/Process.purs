@@ -85,6 +85,7 @@ spec = do
         , callStack: []
         , mailbox: []
         , links: Set.empty
+        , remoteLinks: Set.empty
         , monitors: Map.empty
         , parent: Nothing
         , children: Set.empty
@@ -212,6 +213,7 @@ doublerInitialProcess =
   , callStack: []
   , mailbox: []
   , links: Set.empty
+  , remoteLinks: Set.empty
   , monitors: Map.empty
   , parent: Nothing
   , children: Set.empty

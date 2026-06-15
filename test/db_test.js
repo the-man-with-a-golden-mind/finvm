@@ -68,6 +68,11 @@ async function runTests() {
     const dbC = new FinVMDatabase();
     await dbC.insert("t", { a: 1, b: 2, c: 4 });
     assert.notStrictEqual(dbA.hashTable("t"), dbC.hashTable("t"), "Different data must hash differently");
+    // Cache invalidation: after a write, the hash should change; repeated reads stay stable
+    await db1.insert("users", { name: "Eve", age: 22, role: "user" });
+    const hashAfterWrite = db1.hashTable("users");
+    assert.notStrictEqual(hashAfterWrite, hash2, "Hash must invalidate and change after writes");
+    assert.strictEqual(db1.hashTable("users"), hashAfterWrite, "Cached hash must stay stable between writes");
 
     // Test 4: Security and Persistence (Encrypted)
     console.log("4. Testing Encryption & Persistence...");

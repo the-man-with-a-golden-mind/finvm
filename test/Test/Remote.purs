@@ -52,7 +52,7 @@ spec = do
 
       initialProcess =
         { pid: "main", status: ProcessReady, function: "main", frame: { function: "main", pc: 0, registers: Array.replicate 10 VUnit, returnRegister: Nothing, caller: Nothing }
-        , callStack: [], mailbox: [], links: Set.empty, monitors: Map.empty, parent: Nothing, children: Set.empty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
+        , callStack: [], mailbox: [], links: Set.empty, remoteLinks: Set.empty, monitors: Map.empty, parent: Nothing, children: Set.empty, trapExit: false, metadata: { name: "main" }, result: Nothing, error: Nothing, createdSequence: 0, stepsExecuted: 0 }
 
       machine :: Machine
       machine =
@@ -117,4 +117,75 @@ spec = do
           case Map.lookup "main" m'.scheduler.processes of
             Nothing -> fail "main process missing"
             Just p -> Map.isEmpty p.monitors `shouldEqual` true
+
+    it "emits RemoteSpawnIntent with requester metadata for deterministic completion" do
+      let
+        spawnProgram =
+          { version: "1.0", constants: [ VString "vmB" ], functions: Map.fromFoldable
+              [ Tuple "main"
+                  { id: "main", arity: 0, registerCount: 4, parameterTypes: [], returnType: TUnit
+                  , instructions:
+                      [ LOAD_CONST 1 0
+                      , NODE_SPAWN 0 1 "worker" []
+                      , HALT 0
+                      ]
+                  , debug: { name: "main" }, proof: { isInvariant: false }
+                  }
+              , Tuple "worker"
+                  { id: "worker", arity: 0, registerCount: 1, parameterTypes: [], returnType: TUnit
+                  , instructions: [ HALT 0 ]
+                  , debug: { name: "worker" }, proof: { isInvariant: false }
+                  }
+              ]
+          , stateMachines: Map.empty
+          , entrypoint: "main", exports: Map.empty
+          , metadata: { description: "" }, typeTable: Map.empty, capabilities: [], verification: { verified: true }
+          }
+        spawnMachine = machine { program = spawnProgram }
+      case Eval.runMachine spawnMachine of
+        Left err -> fail $ show err
+        Right m' -> do
+          case m'.outbox of
+            List.Cons intent List.Nil -> do
+              intent.type_ `shouldEqual` "RemoteSpawnIntent"
+              case intent.payload of
+                VRecord fields -> do
+                  Map.lookup "node" fields `shouldEqual` Just (VString "vmB")
+                  Map.lookup "requesterPid" fields `shouldEqual` Just (VString "main")
+                  case Map.lookup "requestId" fields of
+                    Just (VString rid) | rid /= "" -> pure unit
+                    _ -> fail "expected non-empty requestId in RemoteSpawnIntent"
+                _ -> fail "Expected VRecord payload for spawn intent"
+            _ -> fail "Expected exactly one spawn intent"
+
+    it "emits RemoteLinkIntent and RemoteUnlinkIntent" do
+      let
+        linkProgram =
+          { version: "1.0", constants: [ VString "other", VString "p42" ], functions: Map.fromFoldable
+              [ Tuple "main"
+                  { id: "main", arity: 0, registerCount: 5, parameterTypes: [], returnType: TUnit
+                  , instructions:
+                      [ LOAD_CONST 1 0
+                      , LOAD_CONST 2 1
+                      , REMOTE_PID_NEW 0 1 2
+                      , NODE_LINK 0
+                      , NODE_UNLINK 0
+                      , HALT 0
+                      ]
+                  , debug: { name: "main" }, proof: { isInvariant: false }
+                  }
+              ]
+          , stateMachines: Map.empty
+          , entrypoint: "main", exports: Map.empty
+          , metadata: { description: "" }, typeTable: Map.empty, capabilities: [], verification: { verified: true }
+          }
+        linkMachine = machine { program = linkProgram }
+      case Eval.runMachine linkMachine of
+        Left err -> fail $ show err
+        Right m' -> do
+          case m'.outbox of
+            List.Cons unlinkIntent (List.Cons linkIntent List.Nil) -> do
+              unlinkIntent.type_ `shouldEqual` "RemoteUnlinkIntent"
+              linkIntent.type_ `shouldEqual` "RemoteLinkIntent"
+            _ -> fail "Expected link + unlink intents"
 

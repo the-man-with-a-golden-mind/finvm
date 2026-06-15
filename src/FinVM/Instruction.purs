@@ -134,6 +134,8 @@ data Instruction
   | REMOTE_PID_LOCAL Register Register
   | NODE_SEND Register Register
   | NODE_SPAWN Register Register FunctionId (Array Register)
+  | NODE_LINK Register
+  | NODE_UNLINK Register
   | NODE_MONITOR Register Register
   | NODE_DEMONITOR Register
   | NODE_OBSERVE_STATE Register Register
