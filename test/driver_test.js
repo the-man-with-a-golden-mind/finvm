@@ -320,6 +320,8 @@ async function main() {
     },
   });
   assert.strictEqual(spawnFail.value, "RemoteSpawnFailed", "NODE_SPAWN failure is deterministic and replayable");
+  const spawnFailReplay = runReplay(spawnProgram, spawnFail.journal);
+  assert.strictEqual(spawnFailReplay.value, spawnFail.value, "spawn-fail transport flow replays with identical final value");
 
   // --- 10. Remote link disconnect obeys trap-exit semantics ---
   console.log("10. remote link disconnect semantics");
@@ -346,6 +348,14 @@ async function main() {
   );
   assert.strictEqual(linkedResume.status, "completed");
   assert.deepStrictEqual(linkedResume.result, { string: "EXIT" }, "trap-exit process receives EXIT message on remote disconnect");
+  const linkedLive = await runLive(linkedProgram, {
+    handlers: {
+      RemoteLinkIntent: async (p) => ({ deliveries: [{ disconnect: { node: p.node, reason: "noconnection" } }] }),
+    },
+  });
+  const linkedReplay = runReplay(linkedProgram, linkedLive.journal);
+  assert.strictEqual(linkedLive.value, "EXIT", "live transport disconnect preserves trap-exit semantics");
+  assert.strictEqual(linkedReplay.value, linkedLive.value, "transport disconnect replay preserves trap-exit semantics");
 
   const linkedNoTrapProgram = JSON.stringify({
     version: "1.0",
@@ -366,6 +376,40 @@ async function main() {
   );
   assert.strictEqual(linkedNoTrapResume.status, "completed", "non-trap linked process exits on disconnect");
   assert.strictEqual(linkedNoTrapResume.result, null, "exited process has no return value");
+  const linkedNoTrapLive = await runLive(linkedNoTrapProgram, {
+    handlers: {
+      RemoteLinkIntent: async (p) => ({ deliveries: [{ disconnect: { node: p.node, reason: "noconnection" } }] }),
+    },
+  });
+  const linkedNoTrapReplay = runReplay(linkedNoTrapProgram, linkedNoTrapLive.journal);
+  assert.strictEqual(linkedNoTrapLive.value, null, "live disconnect exits non-trap linked process");
+  assert.strictEqual(linkedNoTrapReplay.value, linkedNoTrapLive.value, "transport disconnect replay preserves non-trap exit semantics");
+
+  // --- 11. NODE_UNLINK prevents disconnect EXIT delivery ---
+  console.log("11. remote unlink suppresses disconnect side-effect");
+  const unlinkProgram = JSON.stringify({
+    version: "1.0",
+    registerCount: 9,
+    constants: [{ string: "vmB" }, { string: "remote-1" }, { string: "alive" }],
+    instructions: [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["PROC_TRAP_EXIT", true],
+      ["NODE_LINK", 0],
+      ["NODE_UNLINK", 0],
+      ["LOAD_CONST", 4, 2],
+      ["RETURN", 4],
+    ],
+  });
+  const unlinkStart = JSON.parse(runEffectStart(unlinkProgram)(""));
+  assert.strictEqual(unlinkStart.status, "suspended");
+  assert.deepStrictEqual(unlinkStart.pending.map((p) => p.type_), ["RemoteLinkIntent", "RemoteUnlinkIntent"]);
+  const unlinkResume = JSON.parse(
+    runEffectResume(unlinkProgram)(JSON.stringify(unlinkStart.snapshot))(JSON.stringify([{ disconnect: { node: "vmB", reason: "net" } }]))
+  );
+  assert.strictEqual(unlinkResume.status, "completed");
+  assert.deepStrictEqual(unlinkResume.result, { string: "alive" }, "disconnect after unlink should not inject EXIT");
 
   console.log("All effect driver tests passed. 🚀");
 }

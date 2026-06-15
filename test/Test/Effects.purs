@@ -236,6 +236,52 @@ remoteMonitorDisconnectProgram =
   }
   """
 
+remoteDemonitorNoIntentProgram :: String
+remoteDemonitorNoIntentProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 8,
+    "constants": [ { "string": "other" }, { "string": "p42" }, { "string": "missing-ref" } ],
+    "instructions": [
+      ["LOAD_CONST", 1, 0],
+      ["LOAD_CONST", 2, 1],
+      ["REMOTE_PID_NEW", 0, 1, 2],
+      ["NODE_MONITOR", 3, 0],
+      ["LOAD_CONST", 4, 2],
+      ["NODE_DEMONITOR", 4],
+      ["PROC_RECEIVE", 5],
+      ["VARIANT_PAYLOAD", 6, 5],
+      ["RECORD_GET", 7, 6, "reason"],
+      ["RETURN", 7]
+    ]
+  }
+  """
+
+nodeLifecycleDefaultsProgram :: String
+nodeLifecycleDefaultsProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 8,
+    "constants": [ { "string": "vmB" } ],
+    "instructions": [
+      ["LOAD_CONST", 1, 0],
+      ["PROC_RECEIVE", 0],
+      ["NODE_STATUS", 2, 1],
+      ["NODE_LAST_SEEN_TICK", 3, 1],
+      ["NODE_LAST_STATE_HASH", 4, 1],
+      ["NODE_KNOWN", 5],
+      ["RECORD_NEW", 6],
+      ["RECORD_SET", 6, 6, "status", 2],
+      ["RECORD_SET", 6, 6, "tick", 3],
+      ["RECORD_SET", 6, 6, "hash", 4],
+      ["RECORD_SET", 6, 6, "known", 5],
+      ["RETURN", 6]
+    ]
+  }
+  """
+
 obj :: String -> Maybe (Object.Object Json.Json)
 obj s = case jsonParser s of
   Right j -> Json.toObject j
@@ -419,3 +465,65 @@ spec = do
               out2 = runEffectResume remoteMonitorDisconnectProgram snapStr deliveries
               out3 = runEffectResume remoteMonitorDisconnectProgram snapStr deliveries
           out2 `shouldEqual` out3
+
+    it "NODE_DEMONITOR with unknown ref does not emit transport intent or drop real monitor" do
+      let out1 = runEffectStart remoteDemonitorNoIntentProgram ""
+      case obj out1 of
+        Nothing -> fail ("not an object: " <> out1)
+        Just o1 -> do
+          (Object.lookup "status" o1 >>= Json.toString) `shouldEqual` Just "suspended"
+          case Object.lookup "pending" o1 >>= Json.toArray of
+            Nothing -> fail ("no pending in: " <> out1)
+            Just pending -> do
+              Array.length pending `shouldEqual` 1
+              let firstPending = Array.head pending >>= Json.toObject
+              (firstPending >>= Object.lookup "type_" >>= Json.toString) `shouldEqual` Just "RemoteMonitorIntent"
+              case Object.lookup "snapshot" o1 of
+                Nothing -> fail ("no snapshot in: " <> out1)
+                Just snap -> do
+                  let snapStr = Json.stringify snap
+                      deliveries = """[{ "disconnect": { "node": "other", "reason": "after-demonitor" } }]"""
+                      out2 = runEffectResume remoteDemonitorNoIntentProgram snapStr deliveries
+                  case obj out2 of
+                    Nothing -> fail ("not an object: " <> out2)
+                    Just o2 -> do
+                      (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "completed"
+                      let reason = Object.lookup "result" o2 >>= Json.toObject
+                            >>= Object.lookup "string" >>= Json.toString
+                      reason `shouldEqual` Just "after-demonitor"
+
+    it "node status delivery normalizes unsupported status and leaves absent metadata optional" do
+      let out1 = runEffectStart nodeLifecycleDefaultsProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries =
+                """[
+                  { "nodeStatus": { "node": "vmB", "status": "degraded" } },
+                  { "pid": "main", "message": { "string": "wake" } }
+                ]"""
+              out2 = runEffectResume nodeLifecycleDefaultsProgram snapStr deliveries
+          case obj out2 of
+            Nothing -> fail ("not an object: " <> out2)
+            Just o2 -> do
+              (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "completed"
+              let rec = Object.lookup "result" o2 >>= Json.toObject >>= Object.lookup "record" >>= Json.toObject
+              let status = rec >>= Object.lookup "status" >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+              let tickOpt = rec >>= Object.lookup "tick" >>= Json.toObject >>= Object.lookup "option"
+              let hashOpt = rec >>= Object.lookup "hash" >>= Json.toObject >>= Object.lookup "option"
+              let known = rec >>= Object.lookup "known" >>= Json.toObject >>= Object.lookup "list" >>= Json.toArray
+              let tickIsNull = case tickOpt of
+                    Just j -> j == Json.jsonNull
+                    Nothing -> false
+              let hashIsNull = case hashOpt of
+                    Just j -> j == Json.jsonNull
+                    Nothing -> false
+              status `shouldEqual` Just "unknown"
+              tickIsNull `shouldEqual` true
+              hashIsNull `shouldEqual` true
+              case known of
+                Nothing -> fail "NODE_KNOWN list missing"
+                Just ks -> do
+                  let hasVmB = any (\j -> (Json.toObject j >>= Object.lookup "string" >>= Json.toString) == Just "vmB") ks
+                  hasVmB `shouldEqual` true
