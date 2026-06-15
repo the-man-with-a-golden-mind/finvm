@@ -10,6 +10,7 @@ import FinVM.Error (VMError)
 
 data WaitCondition
   = WaitingForMessage
+  | WaitingOnMatch String
   | WaitingForProcess ProcessId
   | WaitingForMonitor MonitorRef
   | WaitingForTick Int
@@ -57,6 +58,7 @@ instance showMonitorTarget :: Show MonitorTarget where
 instance showWaitCondition :: Show WaitCondition where
   show = case _ of
     WaitingForMessage -> "WaitingForMessage"
+    WaitingOnMatch tag -> "WaitingOnMatch " <> tag
     WaitingForProcess pid -> "WaitingForProcess " <> pid
     WaitingForMonitor ref -> "WaitingForMonitor " <> ref
     WaitingForTick t -> "WaitingForTick " <> show t

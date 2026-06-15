@@ -62,6 +62,8 @@ FinVM is a register-based VM. Instructions operate on registers (integer indexes
 - `PROC_SPAWN dst fn [args...]`: Start new process.
 - `PROC_SEND pid msg`: Send message to process mailbox.
 - `PROC_RECEIVE dst`: Read oldest message or block.
+- `PROC_RECEIVE_MATCH dst tagReg`: Scan mailbox in order for first `VVariant` whose tag equals string in `tagReg`; remove only that message, otherwise block on `WaitingOnMatch tag`.
+- `PROC_RECEIVE_MATCH_OPT dst tagReg`: Non-blocking selective receive. Returns `VOption (Just msg)` when match exists, otherwise `VOption Nothing`.
 - `PROC_YIELD`: Voluntarily give up execution slice.
 - `PROC_JOIN`, `PROC_JOIN_RESULT`, `PROC_STATUS`, `PROC_CANCEL`, `PROC_EXIT`: Lifecycle coordination.
 - `PROC_LINK`, `PROC_UNLINK`, `PROC_MONITOR`, `PROC_DEMONITOR`, `PROC_TRAP_EXIT`, `PROC_SLEEP_TICKS`: Erlang-style supervision metadata and logical-tick sleeps.

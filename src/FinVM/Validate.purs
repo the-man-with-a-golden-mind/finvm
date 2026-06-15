@@ -195,6 +195,8 @@ extractRegisters = case _ of
   PROC_SEND r1 r2 -> [r1, r2]
   PROC_RECEIVE r -> [r]
   PROC_RECEIVE_OPT r -> [r]
+  PROC_RECEIVE_MATCH r1 r2 -> [r1, r2]
+  PROC_RECEIVE_MATCH_OPT r1 r2 -> [r1, r2]
   PROC_LINK r -> [r]
   PROC_UNLINK r -> [r]
   PROC_MONITOR r1 r2 -> [r1, r2]

@@ -282,6 +282,82 @@ nodeLifecycleDefaultsProgram =
   }
   """
 
+selectiveAwaitProgram :: String
+selectiveAwaitProgram =
+  """
+  {
+    "version": "1.0",
+    "entrypoint": "main",
+    "constants": [ { "string": "pre" }, { "string": "EffectReply" }, { "string": "k1" }, { "string": "http://u" } ],
+    "functions": {
+      "main": {
+        "registerCount": 10,
+        "instructions": [
+          ["PROC_SELF", 9],
+          ["PROC_SPAWN", 8, "sender", [9]],
+          ["RECORD_NEW", 0],
+          ["LOAD_CONST", 1, 2],
+          ["RECORD_SET", 0, 0, "key", 1],
+          ["LOAD_CONST", 1, 3],
+          ["RECORD_SET", 0, 0, "url", 1],
+          ["EFFECT_NEW", 3, "http.get", 0],
+          ["EFFECT_AWAIT", 3],
+          ["LOAD_CONST", 1, 1],
+          ["PROC_RECEIVE_MATCH", 4, 1],
+          ["VARIANT_PAYLOAD", 5, 4],
+          ["RECORD_GET", 6, 5, "value"],
+          ["PROC_RECEIVE", 7],
+          ["RECORD_NEW", 0],
+          ["RECORD_SET", 0, 0, "reply", 6],
+          ["RECORD_SET", 0, 0, "normal", 7],
+          ["RETURN", 0]
+        ]
+      },
+      "sender": {
+        "arity": 1,
+        "registerCount": 2,
+        "instructions": [
+          ["LOAD_CONST", 1, 0],
+          ["PROC_SEND", 0, 1],
+          ["RETURN", 1]
+        ]
+      }
+    }
+  }
+  """
+
+receiveMatchBlockingProgram :: String
+receiveMatchBlockingProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 4,
+    "constants": [ { "string": "EffectReply" } ],
+    "instructions": [
+      ["LOAD_CONST", 1, 0],
+      ["PROC_RECEIVE_MATCH", 0, 1],
+      ["VARIANT_PAYLOAD", 2, 0],
+      ["RECORD_GET", 3, 2, "value"],
+      ["RETURN", 3]
+    ]
+  }
+  """
+
+receiveMatchOptProgram :: String
+receiveMatchOptProgram =
+  """
+  {
+    "version": "1.0",
+    "registerCount": 2,
+    "constants": [ { "string": "EffectReply" } ],
+    "instructions": [
+      ["LOAD_CONST", 1, 0],
+      ["PROC_RECEIVE_MATCH_OPT", 0, 1],
+      ["RETURN", 0]
+    ]
+  }
+  """
+
 obj :: String -> Maybe (Object.Object Json.Json)
 obj s = case jsonParser s of
   Right j -> Json.toObject j
@@ -527,3 +603,99 @@ spec = do
                 Just ks -> do
                   let hasVmB = any (\j -> (Json.toObject j >>= Object.lookup "string" >>= Json.toString) == Just "vmB") ks
                   hasVmB `shouldEqual` true
+
+    it "PROC_RECEIVE_MATCH picks EffectReply without draining earlier normal messages" do
+      let out1 = runEffectStart selectiveAwaitProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries = """[{ "pid": "main", "key": "k1", "result": { "string": "BODY42" } }]"""
+              out2 = runEffectResume selectiveAwaitProgram snapStr deliveries
+          case obj out2 of
+            Nothing -> fail ("not an object: " <> out2)
+            Just o2 -> do
+              (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "completed"
+              let rec = Object.lookup "result" o2 >>= Json.toObject >>= Object.lookup "record" >>= Json.toObject
+              let reply = rec >>= Object.lookup "reply" >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+              let normal = rec >>= Object.lookup "normal" >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+              reply `shouldEqual` Just "BODY42"
+              normal `shouldEqual` Just "pre"
+
+    it "PROC_RECEIVE_MATCH blocks until matching variant and ignores non-matching delivery" do
+      let out1 = runEffectStart receiveMatchBlockingProgram ""
+      case obj out1 of
+        Nothing -> fail ("not an object: " <> out1)
+        Just o1 -> do
+          (Object.lookup "status" o1 >>= Json.toString) `shouldEqual` Just "deadlock"
+          case Object.lookup "snapshot" o1 of
+            Nothing -> fail ("no snapshot in: " <> out1)
+            Just snap1 -> do
+              let snap1Str = Json.stringify snap1
+                  nonMatching =
+                    """[
+                      {
+                        "pid": "main",
+                        "message": { "variant": { "tag": "Other", "payload": { "string": "noise" } } }
+                      }
+                    ]"""
+                  out2 = runEffectResume receiveMatchBlockingProgram snap1Str nonMatching
+              case obj out2 of
+                Nothing -> fail ("not an object: " <> out2)
+                Just o2 -> do
+                  (Object.lookup "status" o2 >>= Json.toString) `shouldEqual` Just "deadlock"
+                  case Object.lookup "snapshot" o2 of
+                    Nothing -> fail ("no snapshot in: " <> out2)
+                    Just snap2 -> do
+                      let snap2Str = Json.stringify snap2
+                          matching =
+                            """[
+                              {
+                                "pid": "main",
+                                "message": {
+                                  "variant": {
+                                    "tag": "EffectReply",
+                                    "payload": {
+                                      "record": {
+                                        "key": { "string": "k1" },
+                                        "value": { "string": "HIT" }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            ]"""
+                          out3 = runEffectResume receiveMatchBlockingProgram snap2Str matching
+                      case obj out3 of
+                        Nothing -> fail ("not an object: " <> out3)
+                        Just o3 -> do
+                          (Object.lookup "status" o3 >>= Json.toString) `shouldEqual` Just "completed"
+                          let value = Object.lookup "result" o3 >>= Json.toObject >>= Object.lookup "string" >>= Json.toString
+                          value `shouldEqual` Just "HIT"
+
+    it "PROC_RECEIVE_MATCH_OPT returns None when no matching message exists and never blocks" do
+      let out = runEffectStart receiveMatchOptProgram ""
+      case obj out of
+        Nothing -> fail ("not an object: " <> out)
+        Just o -> do
+          (Object.lookup "status" o >>= Json.toString) `shouldEqual` Just "completed"
+          let noneOpt = Object.lookup "result" o >>= Json.toObject >>= Object.lookup "option"
+          let isNone = case noneOpt of
+                Just j -> j == Json.jsonNull
+                Nothing -> false
+          isNone `shouldEqual` true
+
+    it "selective receive replay is deterministic with interleaved normal messages and replies" do
+      let out1 = runEffectStart selectiveAwaitProgram ""
+      case obj out1 >>= Object.lookup "snapshot" of
+        Nothing -> fail ("no snapshot in: " <> out1)
+        Just snap -> do
+          let snapStr = Json.stringify snap
+              deliveries =
+                """[
+                  { "pid": "main", "message": { "string": "host-msg" } },
+                  { "pid": "main", "key": "k1", "result": { "string": "R1" } }
+                ]"""
+              out2 = runEffectResume selectiveAwaitProgram snapStr deliveries
+              out3 = runEffectResume selectiveAwaitProgram snapStr deliveries
+          out2 `shouldEqual` out3

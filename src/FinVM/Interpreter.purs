@@ -638,7 +638,19 @@ evalInstruction m p func inst =
             _ <- if Array.length targetP.mailbox >= m.config.limits.maxMailboxSize
               then Left $ VMError MailboxTooLarge ("Process " <> targetPid <> " mailbox is full")
               else pure unit
-            let m' = m { scheduler = Scheduler.deliverMessage m.scheduler targetPid vMsg }
+            let
+              mailbox' = Array.snoc targetP.mailbox vMsg
+              wakesMailbox = case targetP.status of
+                ProcessWaiting WaitingForMessage -> true
+                ProcessWaiting (WaitingOnMatch tag) -> mailboxHasVariantTag tag mailbox'
+                _ -> false
+              targetP' = targetP
+                { mailbox = mailbox'
+                , status = if wakesMailbox then ProcessReady else targetP.status
+                }
+              s1 = Scheduler.updateProcess m.scheduler targetP'
+              s2 = if wakesMailbox then Scheduler.yieldProcess s1 targetPid else s1
+              m' = m { scheduler = s2 }
             pure $ Tuple m' pNextPc
       _ -> Left $ VMError TypeMismatch "PROC_SEND requires a ProcessRef"
 
@@ -655,6 +667,26 @@ evalInstruction m p func inst =
     case Array.uncons p.mailbox of
       Nothing -> pure $ Tuple m (writeReg pNextPc dst (VOption Nothing))
       Just { head, tail } -> pure $ Tuple m (writeReg (pNextPc { mailbox = tail }) dst (VOption (Just head)))
+
+  PROC_RECEIVE_MATCH dst tagReg -> do
+    tagVal <- readReg p tagReg
+    case tagVal of
+      VString tag -> case findFirstVariantTag tag p.mailbox of
+        Nothing -> pure $ Tuple m (p { status = ProcessWaiting (WaitingOnMatch tag) })
+        Just matched ->
+          let mailbox' = fromMaybe p.mailbox (Array.deleteAt matched.index p.mailbox)
+          in pure $ Tuple m (writeReg (pNextPc { mailbox = mailbox' }) dst matched.value)
+      _ -> Left $ VMError TypeMismatch "PROC_RECEIVE_MATCH requires tag register to be String"
+
+  PROC_RECEIVE_MATCH_OPT dst tagReg -> do
+    tagVal <- readReg p tagReg
+    case tagVal of
+      VString tag -> case findFirstVariantTag tag p.mailbox of
+        Nothing -> pure $ Tuple m (writeReg pNextPc dst (VOption Nothing))
+        Just matched ->
+          let mailbox' = fromMaybe p.mailbox (Array.deleteAt matched.index p.mailbox)
+          in pure $ Tuple m (writeReg (pNextPc { mailbox = mailbox' }) dst (VOption (Just matched.value)))
+      _ -> Left $ VMError TypeMismatch "PROC_RECEIVE_MATCH_OPT requires tag register to be String"
 
   PROC_YIELD -> pure $ Tuple m (pNextPc { status = ProcessReady })
 
@@ -1062,6 +1094,20 @@ awaitKey = case _ of
     Just (VString k) -> Just k
     _ -> Nothing
   _ -> Nothing
+
+findFirstVariantTag :: String -> Array Value -> Maybe { index :: Int, value :: Value }
+findFirstVariantTag tag values = go 0 values
+  where
+    go idx vs = case Array.uncons vs of
+      Nothing -> Nothing
+      Just { head, tail } -> case head of
+        VVariant t _ | t == tag -> Just { index: idx, value: head }
+        _ -> go (idx + 1) tail
+
+mailboxHasVariantTag :: String -> Array Value -> Boolean
+mailboxHasVariantTag tag values = case findFirstVariantTag tag values of
+  Just _ -> true
+  Nothing -> false
 
 nodeStateKey :: String
 nodeStateKey = "__finvm.nodes"

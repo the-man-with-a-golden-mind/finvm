@@ -67,6 +67,18 @@ The host now uses the snapshot/resume API, not whole-program re-run:
 This model suspends only the waiting process (`EFFECT_AWAIT`) while other actors
 can continue running and mutating state before quiescence.
 
+### Selective receive for async replies
+- Effect replies are delivered as mailbox variants:
+  `VVariant "EffectReply" { key, value }`.
+- `PROC_RECEIVE` stays FIFO and may consume unrelated earlier messages first.
+- For Erlang-style selective receive, use:
+  - `PROC_RECEIVE_MATCH dst tagReg` (blocking)
+  - `PROC_RECEIVE_MATCH_OPT dst tagReg` (non-blocking)
+- These opcodes scan mailbox order for the first matching variant tag, remove only
+  that element, and keep all other messages in place.
+- A process waiting on `WaitingOnMatch tag` is woken only when a delivery/send
+  leaves a matching `VVariant tag _` in its mailbox (no wake on arbitrary messages).
+
 ### Remote monitor intents and disconnect delivery
 - `NODE_MONITOR` emits `RemoteMonitorIntent` and stores a monitor ref in-process.
 - `NODE_DEMONITOR` removes that ref and emits `RemoteDemonitorIntent`.

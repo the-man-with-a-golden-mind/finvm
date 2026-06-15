@@ -118,6 +118,8 @@ data Instruction
   | PROC_SEND Register Register
   | PROC_RECEIVE Register
   | PROC_RECEIVE_OPT Register
+  | PROC_RECEIVE_MATCH Register Register
+  | PROC_RECEIVE_MATCH_OPT Register Register
   | PROC_LINK Register
   | PROC_UNLINK Register
   | PROC_MONITOR Register Register
@@ -197,6 +199,8 @@ instance showInstruction :: Show Instruction where
     PROC_SPAWN d f a -> "PROC_SPAWN " <> show d <> " " <> f <> " " <> show a
     PROC_SEND p m -> "PROC_SEND " <> show p <> " " <> show m
     PROC_RECEIVE d -> "PROC_RECEIVE " <> show d
+    PROC_RECEIVE_MATCH d t -> "PROC_RECEIVE_MATCH " <> show d <> " " <> show t
+    PROC_RECEIVE_MATCH_OPT d t -> "PROC_RECEIVE_MATCH_OPT " <> show d <> " " <> show t
     PROC_YIELD -> "PROC_YIELD"
     MACHINE_NEW d m i -> "MACHINE_NEW " <> show d <> " " <> m <> " " <> show i
     MACHINE_STATE d m -> "MACHINE_STATE " <> show d <> " " <> show m

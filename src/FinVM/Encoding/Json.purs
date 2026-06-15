@@ -399,11 +399,13 @@ applyDelivery m d = case d of
     Nothing -> m
     Just p ->
       let
+        mailbox' = Array.snoc p.mailbox payload.message
         wokenFor = case p.status of
           ProcessWaiting WaitingForMessage -> true
+          ProcessWaiting (WaitingOnMatch tag) -> mailboxHasVariantTag tag mailbox'
           _ -> false
         p' = p
-          { mailbox = Array.snoc p.mailbox payload.message
+          { mailbox = mailbox'
           , status = if wokenFor then ProcessReady else p.status
           }
         s1 = Scheduler.updateProcess m.scheduler p'
@@ -414,16 +416,27 @@ applyDelivery m d = case d of
     Just p ->
       let
         reply = VVariant "EffectReply" (VRecord (Map.fromFoldable [ Tuple "key" (VString payload.key), Tuple "value" payload.result ]))
+        mailbox' = Array.snoc p.mailbox reply
         wokenFor = case p.status of
           ProcessWaiting (WaitingOnEffect k) -> k == payload.key
+          ProcessWaiting (WaitingOnMatch tag) -> mailboxHasVariantTag tag mailbox'
           _ -> false
         p' = p
-          { mailbox = Array.snoc p.mailbox reply
+          { mailbox = mailbox'
           , status = if wokenFor then ProcessReady else p.status
           }
         s1 = Scheduler.updateProcess m.scheduler p'
         s2 = if wokenFor then Scheduler.yieldProcess s1 payload.pid else s1
       in m { scheduler = s2 }
+
+mailboxHasVariantTag :: String -> Array Value -> Boolean
+mailboxHasVariantTag tag messages = case Array.find matches messages of
+  Just _ -> true
+  Nothing -> false
+  where
+    matches = case _ of
+      VVariant t _ -> t == tag
+      _ -> false
 
 downMessage :: String -> String -> String -> Value
 downMessage ref pid reason =
@@ -718,6 +731,8 @@ decodeInstruction json = do
     "PROC_SEND" -> I.PROC_SEND <$> intAt 1 parts <*> intAt 2 parts
     "PROC_RECEIVE" -> I.PROC_RECEIVE <$> intAt 1 parts
     "PROC_RECEIVE_OPT" -> I.PROC_RECEIVE_OPT <$> intAt 1 parts
+    "PROC_RECEIVE_MATCH" -> I.PROC_RECEIVE_MATCH <$> intAt 1 parts <*> intAt 2 parts
+    "PROC_RECEIVE_MATCH_OPT" -> I.PROC_RECEIVE_MATCH_OPT <$> intAt 1 parts <*> intAt 2 parts
     "PROC_LINK" -> I.PROC_LINK <$> intAt 1 parts
     "PROC_UNLINK" -> I.PROC_UNLINK <$> intAt 1 parts
     "PROC_MONITOR" -> I.PROC_MONITOR <$> intAt 1 parts <*> intAt 2 parts

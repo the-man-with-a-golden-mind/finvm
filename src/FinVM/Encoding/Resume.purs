@@ -254,6 +254,7 @@ decVal j =
 encWait :: WaitCondition -> J.Json
 encWait = case _ of
   WaitingForMessage -> obj [ Tuple "w" (J.fromString "message") ]
+  WaitingOnMatch tag -> obj [ Tuple "w" (J.fromString "match"), Tuple "tag" (J.fromString tag) ]
   WaitingForProcess pid -> obj [ Tuple "w" (J.fromString "process"), Tuple "pid" (J.fromString pid) ]
   WaitingForMonitor ref -> obj [ Tuple "w" (J.fromString "monitor"), Tuple "ref" (J.fromString ref) ]
   WaitingForTick t -> obj [ Tuple "w" (J.fromString "tick"), Tuple "tick" (jint t) ]
@@ -266,6 +267,7 @@ decWait o = do
   w <- strField "w" o
   case w of
     "message" -> Right WaitingForMessage
+    "match" -> WaitingOnMatch <$> strField "tag" o
     "process" -> WaitingForProcess <$> strField "pid" o
     "monitor" -> WaitingForMonitor <$> strField "ref" o
     "tick" -> WaitingForTick <$> intField "tick" o
