@@ -1,6 +1,6 @@
 {
   "name": "@v_m_v/finvm",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
   "bin": {
     "finvm": "bin/finvm.js"
@@ -15,19 +15,24 @@
     "LLM.txt"
   ],
   "scripts": {
-    "test": "npm run test:purs && npm run test:js && npm run test:driver",
+    "test": "npm run test:purs && npm run test:js && npm run test:crypto && npm run test:e2e && npm run test:driver",
     "test:purs": "spago test",
     "test:js": "node test/db_test.js",
+    "test:crypto": "node scripts/bundle.mjs && node test/crypto_test.js && node test/input_decode_test.js && node test/sealed_e2e_test.js && node test/secure_effects_test.js && node test/server_bundle_test.js",
+    "test:e2e": "node test/secure_platform_e2e_test.js",
     "test:driver": "node test/driver_test.js",
     "fuzz": "node test/fuzz.js",
     "stress": "node bench/stress.js",
     "bench": "node bench/vm_vs_js_benchmark.js",
+    "bench:secure": "node scripts/bundle.mjs && node bench/secure_benchmark.js",
     "prepublishOnly": "npm run build",
     "build": "spago build && npm run bundle",
-    "bundle": "npm run bundle:core && npm run bundle:api && npm run bundle:browser",
-    "bundle:core": "esbuild output/Main/index.js --bundle --platform=node --outfile=dist/finvm-core.js --format=esm --external:big-integer",
-    "bundle:api": "esbuild output/FinVM.Encoding.Json/index.js --bundle --platform=node --outfile=dist/finvm-api.js --format=esm --external:big-integer",
-    "bundle:browser": "esbuild output/FinVM.Encoding.Json/index.js --bundle --platform=browser --outfile=dist/finvm-api.browser.js --format=esm --external:node:fs/promises"
+    "bundle": "node scripts/bundle.mjs",
+    "bundle:core": "node scripts/bundle.mjs",
+    "bundle:api": "node scripts/bundle.mjs",
+    "bundle:browser": "node scripts/bundle.mjs",
+    "bundle:secure": "node scripts/bundle.mjs",
+    "bundle:server-guard-test": "FINVM_SERVER_BUILD=1 node -e \"import('./src/FinVM/FFI/SecureLoader.js').then(()=>process.exit(1)).catch(()=>process.exit(0))\""
   },
   "keywords": [
     "vm",
@@ -43,10 +48,14 @@
   "description": "FinVM — a universal deterministic register-based virtual machine.",
   "devDependencies": {
     "esbuild": "^0.28.0",
+    "fake-indexeddb": "^6.2.5",
     "purescript": "^0.15.16",
     "spago": "^0.21.0"
   },
   "dependencies": {
-    "big-integer": "^1.6.52"
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "big-integer": "^1.6.52",
+    "hash-wasm": "^4.12.0"
   }
 }

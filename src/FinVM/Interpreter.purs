@@ -1168,6 +1168,8 @@ runStatefulBuiltin m id version args =
     "cache.set" -> Just (cacheSet m args)
     "cache.get" -> Just (cacheGet m args)
     "cache.delete" -> Just (cacheDelete m args)
+    "input.get" -> Just (inputGet m args)
+    "input.all" -> Just (inputAll m args)
     _ -> Nothing
 
 dbStateKey :: String
@@ -1276,6 +1278,18 @@ cacheDelete m args = case args of
         existed = Map.member key entries
     in pure $ Tuple (writeCacheNamespace ns (Map.delete key entries) m) (VBool existed)
   _ -> Left $ VMError TypeMismatch "cache.delete/v1 expects (Namespace:String, Key:String)"
+
+inputGet :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+inputGet m args = case args of
+  [VString name] ->
+    case Map.lookup name m.input of
+      Nothing -> Left $ VMError MissingInput ("Input not found: " <> name)
+      Just v -> pure $ Tuple m v
+  _ -> Left $ VMError TypeMismatch "input.get/v1 expects (Name:String)"
+
+inputAll :: Machine -> Array Value -> Either VMError (Tuple Machine Value)
+inputAll m _ =
+  pure $ Tuple m (VRecord m.input)
 
 rowMatchesQuery :: Map.Map String Value -> Value -> Boolean
 rowMatchesQuery query row = case row of

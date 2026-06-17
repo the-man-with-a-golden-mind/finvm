@@ -1,5 +1,6 @@
 module FinVM.Encoding.Json
   ( decodeProgramFile
+  , decodeProgramFileWithInputValues
   , runJsonProgram
   , runJsonProgramResult
   , runEffectStep
@@ -26,12 +27,13 @@ import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Set as Set
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
-import FinVM.Error (VMError(..))
+import FinVM.Error (VMError(..), ErrorCode(DecryptionFailed))
 import FinVM.Eval as Eval
 import FinVM.Frame (Frame)
 import FinVM.Function as VMFunction
 import FinVM.Instruction (Instruction)
 import FinVM.Instruction as I
+import FinVM.Input.Schema as InputSchema
 import FinVM.Limits (EvalLimits)
 import FinVM.Machine (Machine)
 import FinVM.Numeric.Rounding (Rounding(..))
@@ -67,18 +69,33 @@ data ResumeDelivery
   | DeliveryNodeStatus { node :: String, status :: String, reason :: Maybe String, lastSeenTick :: Maybe Int, lastStateHash :: Maybe String }
 
 decodeProgramFile :: String -> Either String JsonProgramFile
-decodeProgramFile source = do
+decodeProgramFile source = decodeProgramFileWithInputValues source Nothing
+
+decodeProgramFileWithInputValues :: String -> Maybe String -> Either String JsonProgramFile
+decodeProgramFileWithInputValues source decryptedValuesJson = do
   root <- jsonParser source
+  _ <- guardNotSealedRoot root
   object <- asObject "program" root
+  decryptedValues <- case decryptedValuesJson of
+    Nothing -> pure Nothing
+    Just jsonText -> do
+      valuesRoot <- jsonParser jsonText
+      valuesObj <- asObject "decrypted inputs.values" valuesRoot
+      values <- traverseObject decodeValue valuesObj
+      pure (Just values)
   constants <- case Object.lookup "constants" object of
     Nothing -> pure []
     Just json -> asArray "constants" json >>= traverse decodeValue
   state <- optionalObjectMap "state" object decodeValue
-  input <- optionalObjectMap "input" object decodeValue
+  legacyInput <- optionalObjectMap "input" object decodeValue
+  schemaInput <- decodeSchemaInputs object decryptedValues
+  let input = Map.union schemaInput legacyInput
   limits <- decodeLimits object
   performanceMode <- optionalBool "performanceMode" object <#> fromMaybe false
   version <- optionalStringWithDefault "version" "1.0" object
   Tuple functions entrypoint <- decodeFunctionSet object
+  let hasInputs = Object.member "inputs" object
+      caps = if hasInputs then [ "input" ] else []
   let
     program =
       { version
@@ -89,10 +106,50 @@ decodeProgramFile source = do
       , exports: Map.singleton entrypoint entrypoint
       , metadata: { description: "JSON CLI program" }
       , typeTable: Map.empty
-      , capabilities: []
+      , capabilities: caps
       , verification: { verified: false }
       }
   pure { program, state, input, limits, performanceMode }
+
+-- | Reject fenc-wrapped program JSON at the VM decode boundary (decrypt via SecureLoader first).
+guardNotSealedRoot :: Json.Json -> Either String Unit
+guardNotSealedRoot json = case Json.toObject json of
+  Nothing -> Left "program must be a JSON object"
+  Just obj ->
+    if isFencRoot obj
+      then Left $ renderVMError (VMError DecryptionFailed "Program is sealed; decrypt via SecureLoader before loading")
+      else pure unit
+
+isFencRoot :: Object Json.Json -> Boolean
+isFencRoot obj = case Object.lookup "fenc" obj of
+  Nothing -> false
+  Just j -> case Json.toNumber j of
+    Just n -> n == 1.0
+    Nothing -> false
+
+-- | Parse the structured `inputs` section (schema + values). When
+-- | `decryptedValues` is provided (from SecureLoader), it overrides
+-- | `inputs.values` in the JSON (which may be a fenc envelope placeholder).
+decodeSchemaInputs :: Object Json.Json -> Maybe (Map String Value) -> Either String (Map String Value)
+decodeSchemaInputs object decryptedValues =
+  case Object.lookup "inputs" object >>= Json.toObject of
+    Nothing -> pure Map.empty
+    Just inputsObj -> do
+      schema <- InputSchema.decodeSchema inputsObj
+      values <- case decryptedValues of
+        Just vals -> pure vals
+        Nothing -> case Object.lookup "values" inputsObj of
+          Nothing -> pure Map.empty
+          Just valuesJson ->
+            case Json.toObject valuesJson of
+              Just valuesObj ->
+                if Object.member "fenc" valuesObj
+                  then Left $ renderVMError (VMError DecryptionFailed "inputs.values is sealed; decrypt via SecureLoader before loading")
+                  else traverseObject decodeValue valuesObj
+              Nothing -> Left "inputs.values must be an object (or decrypted externally)"
+      case InputSchema.validateInputValues schema values of
+        Left err -> Left $ renderVMError err
+        Right validated -> pure validated
 
 -- | Resolve the program's functions. If a top-level `functions` object is
 -- | present, each entry is a full function spec (multi-function program, so

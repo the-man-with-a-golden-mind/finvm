@@ -26,6 +26,8 @@ import Test.Conformance as Conformance
 import Test.Effects as Effects
 import Test.Snapshot as Snapshot
 import Test.Properties as Properties
+import Test.Secrets as Secrets
+import Test.Input as Input
 import Test.PerformanceMode as PerformanceMode
 
 main :: Effect Unit
@@ -51,5 +53,7 @@ main = runSpecAndExitProcess [consoleReporter] do
   Conformance.spec
   Effects.spec
   Snapshot.spec
+  Input.spec
+  Secrets.spec
   PerformanceMode.spec
   Properties.spec

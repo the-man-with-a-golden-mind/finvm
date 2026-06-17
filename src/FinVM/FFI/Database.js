@@ -1,5 +1,10 @@
 // Web Crypto (AES-GCM, PBKDF2, getRandomValues) — available as a global in both
 // the browser and Node >= 20, so this module is portable with no node:crypto import.
+import { bootstrapCrypto, encryptEnvelope, decryptEnvelope, isFencEnvelope, DecryptionFailed } from './Crypto/index.js';
+import { createDefaultPersistence } from './db-persistence.js';
+
+bootstrapCrypto();
+
 const crypto = globalThis.crypto;
 
 // Pure-JS SHA-256 (sync, no node:crypto) so db.hash works identically in Node and
@@ -84,14 +89,24 @@ function canonicalJSON(value) {
  * Persistence is handled explicitly via commit() to allow bulk operations.
  */
 export class FinVMDatabase {
-    constructor() {
+    constructor(options = {}) {
         this.tables = new Map(); // table -> Map<id, Record>
         this.indices = new Map(); // table -> field -> value -> Set(ids)
-        this.passphrase = null;   // raw passphrase; the AES key is derived per-commit
-        this.salt = null;         // per-database PBKDF2 salt (persisted in the bundle)
+        this.passphrase = null;   // raw passphrase; the AES key is derived per-commit (legacy)
+        this.dek = null;          // 256-bit project DEK (preferred)
+        this.salt = null;         // per-database PBKDF2 salt (persisted in the v2 bundle)
         this.sequence = 0;
         this.isNode = typeof process !== 'undefined' && process.versions && process.versions.node;
-        this.isBrowser = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+        this.isBrowser = !this.isNode && (
+            typeof indexedDB !== 'undefined'
+            || (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined')
+        );
+        this.persistence = options.persistence ?? null;
+    }
+
+    _getPersistence() {
+        if (this.persistence) return this.persistence;
+        return createDefaultPersistence({ isNode: this.isNode, isBrowser: this.isBrowser });
     }
 
     // Store the passphrase. The AES-GCM key is NOT the raw passphrase: it is
@@ -100,7 +115,40 @@ export class FinVMDatabase {
     // load). This stretches weak/short passphrases and gives a full-length key.
     async setKey(keyString) {
         this.passphrase = keyString;
+        this.dek = null;
         this.salt = null;
+    }
+
+    // Set a raw 256-bit project DEK. Preferred over passphrase for sealed programs.
+    async setDEK(dekBytes) {
+        if (!(dekBytes instanceof Uint8Array) || dekBytes.length !== 32) {
+            throw new Error('DEK must be a 32-byte Uint8Array');
+        }
+        this.dek = new Uint8Array(dekBytes);
+        this.passphrase = null;
+        this.salt = null;
+    }
+
+    _serializePlaintext() {
+        const serializableTables = Array.from(this.tables.entries()).map(([tName, tMap]) => {
+            return [tName, Array.from(tMap.entries())];
+        });
+        return JSON.stringify({ sequence: this.sequence, tables: serializableTables });
+    }
+
+    _loadPlaintext(data) {
+        const parsed = JSON.parse(data);
+        const parsedTables = Array.isArray(parsed) ? parsed : parsed.tables;
+        this.sequence = Array.isArray(parsed) ? 0 : parsed.sequence;
+        this.tables = new Map();
+        for (const [tName, entries] of parsedTables) this.tables.set(tName, new Map(entries));
+        for (const [tName, tIndices] of this.indices.entries()) {
+            for (const field of tIndices.keys()) {
+                this.indices.get(tName).set(field, new Map());
+                const tableMap = this.tables.get(tName);
+                if (tableMap) for (const record of tableMap.values()) this._addToIndex(tName, field, record.id, record.content);
+            }
+        }
     }
 
     async _deriveKey(salt) {
@@ -344,22 +392,20 @@ export class FinVMDatabase {
         return sha256Hex(canonical);
     }
 
-    // Produce the portable, encrypted bundle STRING (AES-256-GCM + PBKDF2 salt).
-    // This is the unit of movement: identical in the browser and Node, so a
-    // bundle made in one can be decrypted in the other with the same passphrase.
-    // Returns null when no passphrase is set.
+    // Produce the portable encrypted bundle STRING.
+    // DEK path: fenc envelope { target:"db", ... }. Legacy: v2 PBKDF2 bundle.
+    // Returns null when neither DEK nor passphrase is set.
     async exportEncrypted() {
+        const plaintext = this._serializePlaintext();
+        if (this.dek) {
+            const envelope = await encryptEnvelope(this.dek, 'db', plaintext);
+            return JSON.stringify(envelope);
+        }
         if (this.passphrase == null) return null;
         if (!this.salt) this.salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
         const key = await this._deriveKey(this.salt);
-
-        const serializableTables = Array.from(this.tables.entries()).map(([tName, tMap]) => {
-            return [tName, Array.from(tMap.entries())];
-        });
-        const data = JSON.stringify({ sequence: this.sequence, tables: serializableTables });
         const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(data));
-
+        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
         return JSON.stringify({
             v: 2,
             salt: Array.from(this.salt),
@@ -368,65 +414,52 @@ export class FinVMDatabase {
         });
     }
 
-    // Restore state from a portable encrypted bundle STRING (from exportEncrypted,
-    // commit, localStorage, a file, or the cloud — they are all the same format).
-    // Decrypts with the currently-set passphrase; a wrong passphrase throws (GCM).
+    // Restore state from encrypted bundle (fenc envelope, v2 legacy, or plaintext JSON for dev).
     async importEncrypted(serialized) {
-        if (!serialized || this.passphrase == null) return;
+        if (!serialized) return;
         const bundle = JSON.parse(serialized);
-        if (!bundle.salt) throw new Error("Unsupported FinVM DB bundle: missing key-derivation salt");
 
-        this.salt = new Uint8Array(bundle.salt);
-        const key = await this._deriveKey(this.salt);
-        const decrypted = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: new Uint8Array(bundle.iv) }, key, new Uint8Array(bundle.data));
-
-        const parsed = JSON.parse(new TextDecoder().decode(decrypted));
-        const parsedTables = Array.isArray(parsed) ? parsed : parsed.tables;
-        this.sequence = Array.isArray(parsed) ? 0 : parsed.sequence;
-
-        this.tables = new Map();
-        for (const [tName, entries] of parsedTables) this.tables.set(tName, new Map(entries));
-
-        // Rebuild indices
-        for (const [tName, tIndices] of this.indices.entries()) {
-            for (const field of tIndices.keys()) {
-                this.indices.get(tName).set(field, new Map());
-                const tableMap = this.tables.get(tName);
-                if (tableMap) for (const record of tableMap.values()) this._addToIndex(tName, field, record.id, record.content);
-            }
+        if (isFencEnvelope(bundle)) {
+            if (bundle.target !== 'db') throw new DecryptionFailed('DB envelope target mismatch');
+            if (!this.dek) throw new DecryptionFailed('DEK required for fenc DB bundle');
+            const plaintext = await decryptEnvelope(this.dek, bundle);
+            this._loadPlaintext(plaintext);
+            return;
         }
+
+        if (bundle.v === 2) {
+            if (this.passphrase == null) throw new Error('Passphrase required for v2 DB bundle');
+            if (!bundle.salt) throw new Error('Unsupported FinVM DB bundle: missing key-derivation salt');
+            this.salt = new Uint8Array(bundle.salt);
+            const key = await this._deriveKey(this.salt);
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: new Uint8Array(bundle.iv) }, key, new Uint8Array(bundle.data));
+            this._loadPlaintext(new TextDecoder().decode(decrypted));
+            return;
+        }
+
+        // Plaintext dev bundle (back-compat)
+        if (bundle.tables || Array.isArray(bundle)) {
+            this._loadPlaintext(serialized);
+            return;
+        }
+        throw new DecryptionFailed('Unsupported DB bundle format');
     }
 
-    // Persist the bundle to the environment's default store: localStorage in the
-    // browser, a .finvm.db file in Node. (Same bytes as exportEncrypted.)
+    // Persist the bundle to the environment's default store: IndexedDB in the
+    // browser (localStorage fallback), a .finvm.db file in Node.
     async commit() {
         const serialized = await this.exportEncrypted();
         if (serialized == null) return;
-        if (this.isBrowser) {
-            localStorage.setItem('finvm_db_enc', serialized);
-        } else if (this.isNode) {
-            try {
-                const fs = await import('node:fs/promises');
-                await fs.writeFile('.finvm.db', serialized);
-            } catch (e) {
-                console.error("Failed to commit DB:", e);
-            }
+        try {
+            await this._getPersistence().write(serialized);
+        } catch (e) {
+            console.error('Failed to commit DB:', e);
         }
     }
 
     async load() {
-        let serialized = null;
-        if (this.isBrowser) {
-            serialized = localStorage.getItem('finvm_db_enc');
-        } else if (this.isNode) {
-            try {
-                const fs = await import('node:fs/promises');
-                serialized = await fs.readFile('.finvm.db', 'utf8');
-            } catch (e) {
-                return;
-            }
-        }
+        const serialized = await this._getPersistence().read();
         await this.importEncrypted(serialized);
     }
 }

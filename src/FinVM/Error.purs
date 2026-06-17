@@ -34,6 +34,8 @@ data ErrorCode
   | StepLimitExceeded
   | TraceLimitExceeded
   | UnsupportedVersion
+  | DecryptionFailed
+  | InputValidation
   | CustomErrorCode Int
 
 derive instance eqErrorCode :: Eq ErrorCode
@@ -71,6 +73,8 @@ instance showErrorCode :: Show ErrorCode where
     StepLimitExceeded -> "StepLimitExceeded"
     TraceLimitExceeded -> "TraceLimitExceeded"
     UnsupportedVersion -> "UnsupportedVersion"
+    DecryptionFailed -> "DecryptionFailed"
+    InputValidation -> "InputValidation"
     CustomErrorCode c -> "CustomErrorCode " <> show c
 
 data VMError = VMError ErrorCode String

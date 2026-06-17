@@ -346,6 +346,8 @@ errorCodeFromString s = case s of
   "StepLimitExceeded" -> E.StepLimitExceeded
   "TraceLimitExceeded" -> E.TraceLimitExceeded
   "UnsupportedVersion" -> E.UnsupportedVersion
+  "DecryptionFailed" -> E.DecryptionFailed
+  "InputValidation" -> E.InputValidation
   _ -> case stripPrefix (Pattern "CustomErrorCode ") s >>= Int.fromString of
     Just n -> E.CustomErrorCode n
     Nothing -> E.CustomErrorCode 0
